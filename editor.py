@@ -1,9 +1,13 @@
 """
-Editor de Texto Simples - v1
+Sauim - Editor de Texto v1
 Requisitos: pip install PySide6
 Execução: python editor.py
+
+Formato nativo: .saui (JSON contendo o HTML do documento + metadados de
+página). HTML e TXT continuam disponíveis como formatos de exportação.
 """
 import sys
+import json
 from PySide6.QtCore import Qt, QSizeF, QMarginsF
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen, QColor,
@@ -14,6 +18,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QToolBar, QFileDialog,
     QMessageBox, QStatusBar, QWidget, QVBoxLayout
 )
+from PySide6.QtGui import QActionGroup
 
 # ---------- Configurações de página (em milímetros) ----------
 MM_TO_PX = 96 / 25.4  # 96 DPI (padrão de tela)
@@ -25,6 +30,11 @@ MARGIN_MM = 25          # margem uniforme (2,5 cm) - simples por enquanto
 PAGE_WIDTH_PX = PAGE_WIDTH_MM * MM_TO_PX
 PAGE_HEIGHT_PX = PAGE_HEIGHT_MM * MM_TO_PX
 MARGIN_PX = MARGIN_MM * MM_TO_PX
+
+# ---------- Formato nativo do Sauim ----------
+NOME_APP = "Sauim"
+EXTENSAO_NATIVA = ".saui"
+VERSAO_FORMATO = 1
 
 
 class PagedTextEdit(QTextEdit):
@@ -60,7 +70,7 @@ class PagedTextEdit(QTextEdit):
 class Editor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Editor de Texto — Sem título")
+        self.setWindowTitle(f"{NOME_APP} — Sem título")
         self.resize(1000, 800)
 
         self.current_path = None
@@ -164,29 +174,98 @@ class Editor(QMainWindow):
         self.acao_tachado.triggered.connect(self.alternar_tachado)
         toolbar.addAction(self.acao_tachado)
 
+        toolbar.addSeparator()
+
+        # ---- Alinhamento (mutuamente exclusivo) ----
+        grupo_alinhamento = QActionGroup(self)
+        grupo_alinhamento.setExclusive(True)
+
+        self.acao_alinhar_esquerda = QAction("Esq", self)
+        self.acao_alinhar_esquerda.setCheckable(True)
+        self.acao_alinhar_esquerda.setChecked(True)  # padrão ao abrir
+        self.acao_alinhar_esquerda.setToolTip("Alinhar à esquerda (Ctrl+L)")
+        self.acao_alinhar_esquerda.setShortcut(QKeySequence("Ctrl+L"))
+        self.acao_alinhar_esquerda.triggered.connect(
+            lambda: self.definir_alinhamento(Qt.AlignLeft)
+        )
+        grupo_alinhamento.addAction(self.acao_alinhar_esquerda)
+        toolbar.addAction(self.acao_alinhar_esquerda)
+
+        self.acao_alinhar_centro = QAction("Ctr", self)
+        self.acao_alinhar_centro.setCheckable(True)
+        self.acao_alinhar_centro.setToolTip("Centralizar (Ctrl+E)")
+        self.acao_alinhar_centro.setShortcut(QKeySequence("Ctrl+E"))
+        self.acao_alinhar_centro.triggered.connect(
+            lambda: self.definir_alinhamento(Qt.AlignCenter)
+        )
+        grupo_alinhamento.addAction(self.acao_alinhar_centro)
+        toolbar.addAction(self.acao_alinhar_centro)
+
+        self.acao_alinhar_direita = QAction("Dir", self)
+        self.acao_alinhar_direita.setCheckable(True)
+        self.acao_alinhar_direita.setToolTip("Alinhar à direita (Ctrl+R)")
+        self.acao_alinhar_direita.setShortcut(QKeySequence("Ctrl+R"))
+        self.acao_alinhar_direita.triggered.connect(
+            lambda: self.definir_alinhamento(Qt.AlignRight)
+        )
+        grupo_alinhamento.addAction(self.acao_alinhar_direita)
+        toolbar.addAction(self.acao_alinhar_direita)
+
+        self.acao_alinhar_justificado = QAction("Jus", self)
+        self.acao_alinhar_justificado.setCheckable(True)
+        self.acao_alinhar_justificado.setToolTip("Justificar (Ctrl+J)")
+        self.acao_alinhar_justificado.setShortcut(QKeySequence("Ctrl+J"))
+        self.acao_alinhar_justificado.triggered.connect(
+            lambda: self.definir_alinhamento(Qt.AlignJustify)
+        )
+        grupo_alinhamento.addAction(self.acao_alinhar_justificado)
+        toolbar.addAction(self.acao_alinhar_justificado)
+
+        # guarda numa lista pra facilitar a sincronização com o cursor
+        self._acoes_alinhamento = {
+            Qt.AlignLeft: self.acao_alinhar_esquerda,
+            Qt.AlignCenter: self.acao_alinhar_centro,
+            Qt.AlignRight: self.acao_alinhar_direita,
+            Qt.AlignJustify: self.acao_alinhar_justificado,
+        }
+
     # ---------------- Ações de arquivo ----------------
     def novo_arquivo(self):
         if self._confirmar_descarte():
             self.text_edit.clear()
             self.current_path = None
-            self.setWindowTitle("Editor de Texto — Sem título")
+            self.setWindowTitle(f"{NOME_APP} — Sem título")
 
     def abrir_arquivo(self):
         if not self._confirmar_descarte():
             return
         caminho, _ = QFileDialog.getOpenFileName(
-            self, "Abrir arquivo", "", "Documentos HTML (*.html);;Texto simples (*.txt)"
+            self, "Abrir arquivo", "",
+            f"Documento {NOME_APP} (*{EXTENSAO_NATIVA});;"
+            "Documento HTML (*.html);;Texto simples (*.txt)"
         )
         if not caminho:
             return
-        with open(caminho, "r", encoding="utf-8") as f:
-            conteudo = f.read()
-        if caminho.lower().endswith(".html"):
-            self.text_edit.setHtml(conteudo)
-        else:
-            self.text_edit.setPlainText(conteudo)
+        try:
+            if caminho.lower().endswith(EXTENSAO_NATIVA):
+                with open(caminho, "r", encoding="utf-8") as f:
+                    dados = json.load(f)
+                self.text_edit.setHtml(dados.get("conteudo_html", ""))
+                # Metadados de página (largura/altura/margem) ficam salvos
+                # no arquivo para uso futuro; a v1 ainda usa os valores
+                # fixos definidos no topo do arquivo.
+            elif caminho.lower().endswith(".html"):
+                with open(caminho, "r", encoding="utf-8") as f:
+                    self.text_edit.setHtml(f.read())
+            else:
+                with open(caminho, "r", encoding="utf-8") as f:
+                    self.text_edit.setPlainText(f.read())
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao abrir", str(e))
+            return
         self.current_path = caminho
-        self.setWindowTitle(f"Editor de Texto — {caminho}")
+        self.text_edit.document().setModified(False)
+        self.setWindowTitle(f"{NOME_APP} — {caminho}")
 
     def salvar_arquivo(self):
         if self.current_path:
@@ -196,27 +275,44 @@ class Editor(QMainWindow):
 
     def salvar_como(self):
         caminho, filtro = QFileDialog.getSaveFileName(
-            self, "Salvar como", "", "Documento HTML (*.html);;Texto simples (*.txt)"
+            self, "Salvar como", "",
+            f"Documento {NOME_APP} (*{EXTENSAO_NATIVA});;"
+            "Documento HTML (*.html);;Texto simples (*.txt)"
         )
         if not caminho:
             return
-        if "html" in filtro.lower() and not caminho.lower().endswith(".html"):
+        if EXTENSAO_NATIVA.strip(".") in filtro.lower() and not caminho.lower().endswith(EXTENSAO_NATIVA):
+            caminho += EXTENSAO_NATIVA
+        elif "html" in filtro.lower() and not caminho.lower().endswith(".html"):
             caminho += ".html"
-        if "txt" in filtro.lower() and not caminho.lower().endswith(".txt"):
+        elif "txt" in filtro.lower() and not caminho.lower().endswith(".txt"):
             caminho += ".txt"
         self._salvar_em(caminho)
 
     def _salvar_em(self, caminho):
         try:
-            if caminho.lower().endswith(".html"):
-                conteudo = self.text_edit.toHtml()
+            if caminho.lower().endswith(EXTENSAO_NATIVA):
+                dados = {
+                    "formato": "sauim",
+                    "versao": VERSAO_FORMATO,
+                    "conteudo_html": self.text_edit.toHtml(),
+                    "pagina": {
+                        "largura_mm": PAGE_WIDTH_MM,
+                        "altura_mm": PAGE_HEIGHT_MM,
+                        "margem_mm": MARGIN_MM,
+                    },
+                }
+                with open(caminho, "w", encoding="utf-8") as f:
+                    json.dump(dados, f, ensure_ascii=False, indent=2)
+            elif caminho.lower().endswith(".html"):
+                with open(caminho, "w", encoding="utf-8") as f:
+                    f.write(self.text_edit.toHtml())
             else:
-                conteudo = self.text_edit.toPlainText()
-            with open(caminho, "w", encoding="utf-8") as f:
-                f.write(conteudo)
+                with open(caminho, "w", encoding="utf-8") as f:
+                    f.write(self.text_edit.toPlainText())
             self.current_path = caminho
             self.text_edit.document().setModified(False)
-            self.setWindowTitle(f"Editor de Texto — {caminho}")
+            self.setWindowTitle(f"{NOME_APP} — {caminho}")
             self.status.showMessage("Arquivo salvo.", 3000)
         except Exception as e:
             QMessageBox.critical(self, "Erro ao salvar", str(e))
@@ -283,6 +379,11 @@ class Editor(QMainWindow):
         self.text_edit.mergeCurrentCharFormat(fmt)
         self.text_edit.setFocus()
 
+    def definir_alinhamento(self, alinhamento):
+        # setAlignment age sobre o(s) parágrafo(s) do cursor/seleção atual.
+        self.text_edit.setAlignment(alinhamento)
+        self.text_edit.setFocus()
+
     def _sincronizar_botoes(self):
         fmt = self.text_edit.currentCharFormat()
         for acao in (self.acao_negrito, self.acao_italico,
@@ -297,6 +398,14 @@ class Editor(QMainWindow):
         for acao in (self.acao_negrito, self.acao_italico,
                      self.acao_sublinhado, self.acao_tachado):
             acao.blockSignals(False)
+
+        # alinhamento do parágrafo onde o cursor está
+        alinhamento_atual = self.text_edit.alignment() & Qt.AlignHorizontal_Mask
+        acao_correspondente = self._acoes_alinhamento.get(alinhamento_atual)
+        if acao_correspondente is not None:
+            acao_correspondente.blockSignals(True)
+            acao_correspondente.setChecked(True)
+            acao_correspondente.blockSignals(False)
 
     # ---------------- Status ----------------
     def _atualizar_status(self):
