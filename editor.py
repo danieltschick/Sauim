@@ -16,9 +16,9 @@ from PySide6.QtGui import (
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QToolBar, QFileDialog,
-    QMessageBox, QStatusBar, QWidget, QVBoxLayout
+    QMessageBox, QStatusBar, QWidget, QVBoxLayout, QFontComboBox, QComboBox
 )
-from PySide6.QtGui import QActionGroup
+from PySide6.QtGui import QActionGroup, QIntValidator
 
 # ---------- Configurações de página (em milímetros) ----------
 MM_TO_PX = 96 / 25.4  # 96 DPI (padrão de tela)
@@ -138,9 +138,38 @@ class Editor(QMainWindow):
         toolbar = QToolBar("Formatação")
         self.addToolBar(toolbar)
 
+        # Família da fonte
+        self.combo_fonte = QFontComboBox()
+        self.combo_fonte.setCurrentFont(QFont("Arial"))
+        self.combo_fonte.setToolTip("Fonte")
+        self.combo_fonte.setMaximumWidth(180)
+        self.combo_fonte.currentFontChanged.connect(self.alterar_familia_fonte)
+        toolbar.addWidget(self.combo_fonte)
+
+        # Tamanho da fonte
+        tamanhos_comuns = ["8", "9", "10", "11", "12", "14", "16", "18",
+                            "20", "24", "28", "32", "36", "48", "72"]
+        self.combo_tamanho = QComboBox()
+        self.combo_tamanho.setEditable(True)
+        self.combo_tamanho.addItems(tamanhos_comuns)
+        self.combo_tamanho.setCurrentText("11")
+        self.combo_tamanho.setToolTip("Tamanho da fonte")
+        self.combo_tamanho.setMaximumWidth(60)
+        self.combo_tamanho.lineEdit().setValidator(QIntValidator(1, 400, self))
+        self.combo_tamanho.activated.connect(
+            lambda: self.alterar_tamanho_fonte(self.combo_tamanho.currentText())
+        )
+        self.combo_tamanho.lineEdit().returnPressed.connect(
+            lambda: self.alterar_tamanho_fonte(self.combo_tamanho.currentText())
+        )
+        toolbar.addWidget(self.combo_tamanho)
+
+        toolbar.addSeparator()
+
         self.acao_negrito = QAction("N", self)
         self.acao_negrito.setCheckable(True)
         self.acao_negrito.setShortcut(QKeySequence.Bold)
+        self.acao_negrito.setToolTip("Negrito (Ctrl+B)")
         f = self.acao_negrito.font()
         f.setBold(True)
         self.acao_negrito.setFont(f)
@@ -150,6 +179,7 @@ class Editor(QMainWindow):
         self.acao_italico = QAction("I", self)
         self.acao_italico.setCheckable(True)
         self.acao_italico.setShortcut(QKeySequence.Italic)
+        self.acao_italico.setToolTip("Itálico (Ctrl+I)")
         f = self.acao_italico.font()
         f.setItalic(True)
         self.acao_italico.setFont(f)
@@ -159,6 +189,7 @@ class Editor(QMainWindow):
         self.acao_sublinhado = QAction("S", self)
         self.acao_sublinhado.setCheckable(True)
         self.acao_sublinhado.setShortcut(QKeySequence.Underline)
+        self.acao_sublinhado.setToolTip("Sublinhado (Ctrl+U)")
         f = self.acao_sublinhado.font()
         f.setUnderline(True)
         self.acao_sublinhado.setFont(f)
@@ -168,6 +199,7 @@ class Editor(QMainWindow):
         self.acao_tachado = QAction("T", self)
         self.acao_tachado.setCheckable(True)
         self.acao_tachado.setShortcut(QKeySequence("Ctrl+Shift+X"))
+        self.acao_tachado.setToolTip("Tachado (Ctrl+Shift+X)")
         f = self.acao_tachado.font()
         f.setStrikeOut(True)
         self.acao_tachado.setFont(f)
@@ -379,6 +411,22 @@ class Editor(QMainWindow):
         self.text_edit.mergeCurrentCharFormat(fmt)
         self.text_edit.setFocus()
 
+    def alterar_familia_fonte(self, fonte):
+        fmt = QTextCharFormat()
+        fmt.setFontFamilies([fonte.family()])
+        self._aplicar_formato(fmt)
+
+    def alterar_tamanho_fonte(self, texto):
+        try:
+            tamanho = int(texto)
+        except ValueError:
+            return
+        if tamanho <= 0:
+            return
+        fmt = QTextCharFormat()
+        fmt.setFontPointSize(tamanho)
+        self._aplicar_formato(fmt)
+
     def definir_alinhamento(self, alinhamento):
         # setAlignment age sobre o(s) parágrafo(s) do cursor/seleção atual.
         self.text_edit.setAlignment(alinhamento)
@@ -386,6 +434,18 @@ class Editor(QMainWindow):
 
     def _sincronizar_botoes(self):
         fmt = self.text_edit.currentCharFormat()
+
+        self.combo_fonte.blockSignals(True)
+        self.combo_fonte.setCurrentFont(QFont(fmt.font().family()))
+        self.combo_fonte.blockSignals(False)
+
+        tamanho = fmt.fontPointSize()
+        if tamanho <= 0:
+            tamanho = self.text_edit.font().pointSize()
+        self.combo_tamanho.blockSignals(True)
+        self.combo_tamanho.setCurrentText(str(int(tamanho)))
+        self.combo_tamanho.blockSignals(False)
+
         for acao in (self.acao_negrito, self.acao_italico,
                      self.acao_sublinhado, self.acao_tachado):
             acao.blockSignals(True)
