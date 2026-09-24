@@ -10,15 +10,16 @@ import sys
 import json
 from PySide6.QtCore import Qt, QSizeF, QMarginsF
 from PySide6.QtGui import (
-    QTextCharFormat, QFont, QTextCursor, QPainter, QPen, QColor,
-    QAction, QKeySequence, QPageLayout, QPageSize
+    QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
+    QColor, QAction, QKeySequence, QPageLayout, QPageSize
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QToolBar, QFileDialog,
-    QMessageBox, QStatusBar, QWidget, QVBoxLayout, QFontComboBox, QComboBox
+    QMessageBox, QStatusBar, QWidget, QVBoxLayout, QFontComboBox, QComboBox,
+    QColorDialog
 )
-from PySide6.QtGui import QActionGroup, QIntValidator
+from PySide6.QtGui import QActionGroup, QIntValidator, QIcon, QPixmap
 
 # ---------- Configurações de página (em milímetros) ----------
 MM_TO_PX = 96 / 25.4  # 96 DPI (padrão de tela)
@@ -39,8 +40,15 @@ VERSAO_FORMATO = 1
 
 class PagedTextEdit(QTextEdit):
     """QTextEdit que simula páginas: a largura do texto é limitada à largura
-    da página (com margens) e linhas tracejadas indicam onde cada página
-    termina, conforme o usuário rola o documento."""
+    da página (com margens) e uma linha tracejada indica onde cada página
+    termina, conforme o usuário rola o documento.
+
+    Observação: isso é apenas uma indicação visual — o texto continua
+    fluindo continuamente por trás da linha (sem um "vão" de verdade entre
+    páginas). Tentamos, numa versão anterior, criar esse vão inserindo
+    conteúdo real no documento, mas isso causava travamentos durante a
+    digitação e fazia a paginação da tela não bater com a da impressão.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -261,6 +269,44 @@ class Editor(QMainWindow):
             Qt.AlignJustify: self.acao_alinhar_justificado,
         }
 
+        toolbar.addSeparator()
+
+        # ---- Cor da fonte / cor de realce ----
+        self._cor_fonte_atual = QColor(Qt.black)
+        self._cor_realce_atual = QColor(Qt.yellow)
+
+        self.acao_cor_fonte = QAction(self._icone_cor(self._cor_fonte_atual), "Cor da fonte", self)
+        self.acao_cor_fonte.setToolTip("Cor da fonte")
+        self.acao_cor_fonte.triggered.connect(self.escolher_cor_fonte)
+        toolbar.addAction(self.acao_cor_fonte)
+
+        self.acao_cor_realce = QAction(self._icone_cor(self._cor_realce_atual), "Cor de realce", self)
+        self.acao_cor_realce.setToolTip("Cor de realce (marca-texto)")
+        self.acao_cor_realce.triggered.connect(self.escolher_cor_realce)
+        toolbar.addAction(self.acao_cor_realce)
+
+        self.acao_remover_realce = QAction("Sem realce", self)
+        self.acao_remover_realce.setToolTip("Remover o realce do texto selecionado")
+        self.acao_remover_realce.triggered.connect(self.remover_realce)
+        toolbar.addAction(self.acao_remover_realce)
+
+    @staticmethod
+    def _icone_cor(cor):
+        """Gera um ícone com a letra 'A' e uma barrinha colorida embaixo,
+        para indicar visualmente qual cor está selecionada no botão."""
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(Qt.black)
+        fonte = painter.font()
+        fonte.setBold(True)
+        fonte.setPointSize(12)
+        painter.setFont(fonte)
+        painter.drawText(pixmap.rect().adjusted(0, 0, 0, -6), Qt.AlignCenter, "A")
+        painter.fillRect(3, 19, 18, 4, cor)
+        painter.end()
+        return QIcon(pixmap)
+
     # ---------------- Ações de arquivo ----------------
     def novo_arquivo(self):
         if self._confirmar_descarte():
@@ -405,6 +451,31 @@ class Editor(QMainWindow):
         fmt.setFontStrikeOut(self.acao_tachado.isChecked())
         self._aplicar_formato(fmt)
 
+    def escolher_cor_fonte(self):
+        cor = QColorDialog.getColor(self._cor_fonte_atual, self, "Escolher cor da fonte")
+        if not cor.isValid():
+            return
+        self._cor_fonte_atual = cor
+        self.acao_cor_fonte.setIcon(self._icone_cor(cor))
+        fmt = QTextCharFormat()
+        fmt.setForeground(cor)
+        self._aplicar_formato(fmt)
+
+    def escolher_cor_realce(self):
+        cor = QColorDialog.getColor(self._cor_realce_atual, self, "Escolher cor de realce")
+        if not cor.isValid():
+            return
+        self._cor_realce_atual = cor
+        self.acao_cor_realce.setIcon(self._icone_cor(cor))
+        fmt = QTextCharFormat()
+        fmt.setBackground(cor)
+        self._aplicar_formato(fmt)
+
+    def remover_realce(self):
+        fmt = QTextCharFormat()
+        fmt.setBackground(Qt.transparent)
+        self._aplicar_formato(fmt)
+
     def _aplicar_formato(self, fmt):
         # Se houver seleção, aplica nela; se não, define o formato
         # para o que for digitado a partir do cursor.
@@ -471,6 +542,12 @@ class Editor(QMainWindow):
     def _atualizar_status(self):
         paginas = self.text_edit.page_count()
         self.status.showMessage(f"Páginas: {paginas}")
+
+    def closeEvent(self, event):
+        if self._confirmar_descarte():
+            event.accept()
+        else:
+            event.ignore()
 
 
 def main():
