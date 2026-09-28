@@ -17,9 +17,9 @@ from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QToolBar, QFileDialog,
     QMessageBox, QStatusBar, QWidget, QVBoxLayout, QFontComboBox, QComboBox,
-    QColorDialog
+    QColorDialog, QLabel
 )
-from PySide6.QtGui import QActionGroup, QIntValidator, QIcon, QPixmap
+from PySide6.QtGui import QActionGroup, QIntValidator, QIcon, QPixmap, QTextListFormat
 
 # ---------- Configurações de página (em milímetros) ----------
 MM_TO_PX = 96 / 25.4  # 96 DPI (padrão de tela)
@@ -73,6 +73,36 @@ class PagedTextEdit(QTextEdit):
 
     def page_count(self):
         return max(1, self.document().pageCount())
+
+    def keyPressEvent(self, event):
+        # Tab/Shift+Tab só tem um comportamento especial quando o cursor
+        # está dentro de uma lista (marcadores ou numeração); fora de uma
+        # lista, o Tab funciona normalmente (insere uma tabulação).
+        e_tab = event.key() == Qt.Key_Tab
+        e_shift_tab = event.key() == Qt.Key_Backtab or (
+            e_tab and bool(event.modifiers() & Qt.ShiftModifier)
+        )
+
+        if e_tab or e_shift_tab:
+            cursor = self.textCursor()
+            lista_atual = cursor.currentList()
+            if lista_atual:
+                estilo = lista_atual.format().style()
+                nivel_atual = lista_atual.format().indent()
+                novo_nivel = nivel_atual - 1 if e_shift_tab else nivel_atual + 1
+
+                cursor.beginEditBlock()
+                if novo_nivel < 1:
+                    lista_atual.remove(cursor.block())
+                else:
+                    fmt = QTextListFormat()
+                    fmt.setStyle(estilo)
+                    fmt.setIndent(novo_nivel)
+                    cursor.createList(fmt)
+                cursor.endEditBlock()
+                return  # não repassa o Tab pro comportamento padrão
+
+        super().keyPressEvent(event)
 
 
 class Editor(QMainWindow):
@@ -142,9 +172,12 @@ class Editor(QMainWindow):
         acao_sair.triggered.connect(self.close)
         menu_arquivo.addAction(acao_sair)
 
-        # ---- Formatação ----
-        toolbar = QToolBar("Formatação")
-        self.addToolBar(toolbar)
+        # ==================== Seção: Fonte ====================
+        toolbar_fonte = QToolBar("Fonte")
+        self.addToolBar(toolbar_fonte)
+
+        rotulo_fonte = QLabel(" <b>Fonte</b> ")
+        toolbar_fonte.addWidget(rotulo_fonte)
 
         # Família da fonte
         self.combo_fonte = QFontComboBox()
@@ -152,7 +185,7 @@ class Editor(QMainWindow):
         self.combo_fonte.setToolTip("Fonte")
         self.combo_fonte.setMaximumWidth(180)
         self.combo_fonte.currentFontChanged.connect(self.alterar_familia_fonte)
-        toolbar.addWidget(self.combo_fonte)
+        toolbar_fonte.addWidget(self.combo_fonte)
 
         # Tamanho da fonte
         tamanhos_comuns = ["8", "9", "10", "11", "12", "14", "16", "18",
@@ -170,9 +203,9 @@ class Editor(QMainWindow):
         self.combo_tamanho.lineEdit().returnPressed.connect(
             lambda: self.alterar_tamanho_fonte(self.combo_tamanho.currentText())
         )
-        toolbar.addWidget(self.combo_tamanho)
+        toolbar_fonte.addWidget(self.combo_tamanho)
 
-        toolbar.addSeparator()
+        toolbar_fonte.addSeparator()
 
         self.acao_negrito = QAction("N", self)
         self.acao_negrito.setCheckable(True)
@@ -182,7 +215,7 @@ class Editor(QMainWindow):
         f.setBold(True)
         self.acao_negrito.setFont(f)
         self.acao_negrito.triggered.connect(self.alternar_negrito)
-        toolbar.addAction(self.acao_negrito)
+        toolbar_fonte.addAction(self.acao_negrito)
 
         self.acao_italico = QAction("I", self)
         self.acao_italico.setCheckable(True)
@@ -192,7 +225,7 @@ class Editor(QMainWindow):
         f.setItalic(True)
         self.acao_italico.setFont(f)
         self.acao_italico.triggered.connect(self.alternar_italico)
-        toolbar.addAction(self.acao_italico)
+        toolbar_fonte.addAction(self.acao_italico)
 
         self.acao_sublinhado = QAction("S", self)
         self.acao_sublinhado.setCheckable(True)
@@ -202,7 +235,7 @@ class Editor(QMainWindow):
         f.setUnderline(True)
         self.acao_sublinhado.setFont(f)
         self.acao_sublinhado.triggered.connect(self.alternar_sublinhado)
-        toolbar.addAction(self.acao_sublinhado)
+        toolbar_fonte.addAction(self.acao_sublinhado)
 
         self.acao_tachado = QAction("T", self)
         self.acao_tachado.setCheckable(True)
@@ -212,9 +245,36 @@ class Editor(QMainWindow):
         f.setStrikeOut(True)
         self.acao_tachado.setFont(f)
         self.acao_tachado.triggered.connect(self.alternar_tachado)
-        toolbar.addAction(self.acao_tachado)
+        toolbar_fonte.addAction(self.acao_tachado)
 
-        toolbar.addSeparator()
+        toolbar_fonte.addSeparator()
+
+        # ---- Cor da fonte / cor de realce ----
+        self._cor_fonte_atual = QColor(Qt.black)
+        self._cor_realce_atual = QColor(Qt.yellow)
+
+        self.acao_cor_fonte = QAction(self._icone_cor(self._cor_fonte_atual), "Cor da fonte", self)
+        self.acao_cor_fonte.setToolTip("Cor da fonte")
+        self.acao_cor_fonte.triggered.connect(self.escolher_cor_fonte)
+        toolbar_fonte.addAction(self.acao_cor_fonte)
+
+        self.acao_cor_realce = QAction(self._icone_cor(self._cor_realce_atual), "Cor de realce", self)
+        self.acao_cor_realce.setToolTip("Cor de realce (marca-texto)")
+        self.acao_cor_realce.triggered.connect(self.escolher_cor_realce)
+        toolbar_fonte.addAction(self.acao_cor_realce)
+
+        self.acao_remover_realce = QAction("Sem realce", self)
+        self.acao_remover_realce.setToolTip("Remover o realce do texto selecionado")
+        self.acao_remover_realce.triggered.connect(self.remover_realce)
+        toolbar_fonte.addAction(self.acao_remover_realce)
+
+        # ==================== Seção: Parágrafo ====================
+        self.addToolBarBreak()
+        toolbar_paragrafo = QToolBar("Parágrafo")
+        self.addToolBar(toolbar_paragrafo)
+
+        rotulo_paragrafo = QLabel(" <b>Parágrafo</b> ")
+        toolbar_paragrafo.addWidget(rotulo_paragrafo)
 
         # ---- Alinhamento (mutuamente exclusivo) ----
         grupo_alinhamento = QActionGroup(self)
@@ -229,9 +289,9 @@ class Editor(QMainWindow):
             lambda: self.definir_alinhamento(Qt.AlignLeft)
         )
         grupo_alinhamento.addAction(self.acao_alinhar_esquerda)
-        toolbar.addAction(self.acao_alinhar_esquerda)
+        toolbar_paragrafo.addAction(self.acao_alinhar_esquerda)
 
-        self.acao_alinhar_centro = QAction("Ctr", self)
+        self.acao_alinhar_centro = QAction("Centr", self)
         self.acao_alinhar_centro.setCheckable(True)
         self.acao_alinhar_centro.setToolTip("Centralizar (Ctrl+E)")
         self.acao_alinhar_centro.setShortcut(QKeySequence("Ctrl+E"))
@@ -239,7 +299,7 @@ class Editor(QMainWindow):
             lambda: self.definir_alinhamento(Qt.AlignCenter)
         )
         grupo_alinhamento.addAction(self.acao_alinhar_centro)
-        toolbar.addAction(self.acao_alinhar_centro)
+        toolbar_paragrafo.addAction(self.acao_alinhar_centro)
 
         self.acao_alinhar_direita = QAction("Dir", self)
         self.acao_alinhar_direita.setCheckable(True)
@@ -249,7 +309,7 @@ class Editor(QMainWindow):
             lambda: self.definir_alinhamento(Qt.AlignRight)
         )
         grupo_alinhamento.addAction(self.acao_alinhar_direita)
-        toolbar.addAction(self.acao_alinhar_direita)
+        toolbar_paragrafo.addAction(self.acao_alinhar_direita)
 
         self.acao_alinhar_justificado = QAction("Jus", self)
         self.acao_alinhar_justificado.setCheckable(True)
@@ -259,7 +319,7 @@ class Editor(QMainWindow):
             lambda: self.definir_alinhamento(Qt.AlignJustify)
         )
         grupo_alinhamento.addAction(self.acao_alinhar_justificado)
-        toolbar.addAction(self.acao_alinhar_justificado)
+        toolbar_paragrafo.addAction(self.acao_alinhar_justificado)
 
         # guarda numa lista pra facilitar a sincronização com o cursor
         self._acoes_alinhamento = {
@@ -269,26 +329,26 @@ class Editor(QMainWindow):
             Qt.AlignJustify: self.acao_alinhar_justificado,
         }
 
-        toolbar.addSeparator()
+        toolbar_paragrafo.addSeparator()
 
-        # ---- Cor da fonte / cor de realce ----
-        self._cor_fonte_atual = QColor(Qt.black)
-        self._cor_realce_atual = QColor(Qt.yellow)
+        # ---- Listas ----
+        self.acao_marcadores = QAction("• Lista", self)
+        self.acao_marcadores.setToolTip(
+            "Marcadores com níveis"
+        )
+        self.acao_marcadores.triggered.connect(
+            lambda: self.alternar_lista(QTextListFormat.ListDisc)
+        )
+        toolbar_paragrafo.addAction(self.acao_marcadores)
 
-        self.acao_cor_fonte = QAction(self._icone_cor(self._cor_fonte_atual), "Cor da fonte", self)
-        self.acao_cor_fonte.setToolTip("Cor da fonte")
-        self.acao_cor_fonte.triggered.connect(self.escolher_cor_fonte)
-        toolbar.addAction(self.acao_cor_fonte)
-
-        self.acao_cor_realce = QAction(self._icone_cor(self._cor_realce_atual), "Cor de realce", self)
-        self.acao_cor_realce.setToolTip("Cor de realce (marca-texto)")
-        self.acao_cor_realce.triggered.connect(self.escolher_cor_realce)
-        toolbar.addAction(self.acao_cor_realce)
-
-        self.acao_remover_realce = QAction("Sem realce", self)
-        self.acao_remover_realce.setToolTip("Remover o realce do texto selecionado")
-        self.acao_remover_realce.triggered.connect(self.remover_realce)
-        toolbar.addAction(self.acao_remover_realce)
+        self.acao_numeracao = QAction("1. Lista", self)
+        self.acao_numeracao.setToolTip(
+            "Marcadores numerados"
+        )
+        self.acao_numeracao.triggered.connect(
+            lambda: self.alternar_lista(QTextListFormat.ListDecimal)
+        )
+        toolbar_paragrafo.addAction(self.acao_numeracao)
 
     @staticmethod
     def _icone_cor(cor):
@@ -501,6 +561,23 @@ class Editor(QMainWindow):
     def definir_alinhamento(self, alinhamento):
         # setAlignment age sobre o(s) parágrafo(s) do cursor/seleção atual.
         self.text_edit.setAlignment(alinhamento)
+        self.text_edit.setFocus()
+
+    def alternar_lista(self, estilo):
+        """Aplica marcadores ou numeração ao(s) parágrafo(s) atual(is).
+        Clicar novamente no mesmo estilo remove a lista."""
+        cursor = self.text_edit.textCursor()
+        lista_atual = cursor.currentList()
+        cursor.beginEditBlock()
+        if lista_atual and lista_atual.format().style() == estilo:
+            lista_atual.remove(cursor.block())
+        else:
+            fmt = QTextListFormat()
+            fmt.setStyle(estilo)
+            if lista_atual:
+                fmt.setIndent(lista_atual.format().indent())
+            cursor.createList(fmt)
+        cursor.endEditBlock()
         self.text_edit.setFocus()
 
     def _sincronizar_botoes(self):
