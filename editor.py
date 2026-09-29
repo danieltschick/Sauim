@@ -378,7 +378,7 @@ class Editor(QMainWindow):
         toolbar_fonte.addAction(self.acao_remover_realce)
 
         # ==================== Seção: Parágrafo ====================
-        self.addToolBarBreak()
+        # self.addToolBarBreak()
         toolbar_paragrafo = QToolBar("Parágrafo")
         self.addToolBar(toolbar_paragrafo)
 
@@ -392,15 +392,15 @@ class Editor(QMainWindow):
         self.acao_alinhar_esquerda = QAction("Esq", self)
         self.acao_alinhar_esquerda.setCheckable(True)
         self.acao_alinhar_esquerda.setChecked(True)  # padrão ao abrir
-        self.acao_alinhar_esquerda.setToolTip("Alinhar à esquerda (Ctrl+L)")
-        self.acao_alinhar_esquerda.setShortcut(QKeySequence("Ctrl+L"))
+        self.acao_alinhar_esquerda.setToolTip("Alinhar à esquerda (Ctrl+Q)")
+        self.acao_alinhar_esquerda.setShortcut(QKeySequence("Ctrl+Q"))
         self.acao_alinhar_esquerda.triggered.connect(
             lambda: self.definir_alinhamento(Qt.AlignLeft)
         )
         grupo_alinhamento.addAction(self.acao_alinhar_esquerda)
         toolbar_paragrafo.addAction(self.acao_alinhar_esquerda)
 
-        self.acao_alinhar_centro = QAction("Ctr", self)
+        self.acao_alinhar_centro = QAction("Centr.", self)
         self.acao_alinhar_centro.setCheckable(True)
         self.acao_alinhar_centro.setToolTip("Centralizar (Ctrl+E)")
         self.acao_alinhar_centro.setShortcut(QKeySequence("Ctrl+E"))
@@ -412,8 +412,8 @@ class Editor(QMainWindow):
 
         self.acao_alinhar_direita = QAction("Dir", self)
         self.acao_alinhar_direita.setCheckable(True)
-        self.acao_alinhar_direita.setToolTip("Alinhar à direita (Ctrl+R)")
-        self.acao_alinhar_direita.setShortcut(QKeySequence("Ctrl+R"))
+        self.acao_alinhar_direita.setToolTip("Alinhar à direita (Ctrl+G)")
+        self.acao_alinhar_direita.setShortcut(QKeySequence("Ctrl+G"))
         self.acao_alinhar_direita.triggered.connect(
             lambda: self.definir_alinhamento(Qt.AlignRight)
         )

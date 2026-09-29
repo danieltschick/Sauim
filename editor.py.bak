@@ -8,7 +8,7 @@ página). HTML e TXT continuam disponíveis como formatos de exportação.
 """
 import sys
 import json
-from PySide6.QtCore import Qt, QSizeF, QMarginsF
+from PySide6.QtCore import Qt, QSizeF, QMarginsF, QTimer
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
     QColor, QAction, QKeySequence, QPageLayout, QPageSize
@@ -58,6 +58,11 @@ class PagedTextEdit(QTextEdit):
         self.setFixedWidth(int(PAGE_WIDTH_PX) + 4)
         self.document().setPageSize(QSizeF(PAGE_WIDTH_PX, PAGE_HEIGHT_PX))
 
+        # Renumeração hierárquica de listas numeradas (1 / 1.1 / 1.1.1)
+        self._renumerando = False
+        self._renumeracao_agendada = False
+        self.document().contentsChanged.connect(self._agendar_renumeracao)
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self.viewport())
@@ -85,24 +90,128 @@ class PagedTextEdit(QTextEdit):
 
         if e_tab or e_shift_tab:
             cursor = self.textCursor()
-            lista_atual = cursor.currentList()
-            if lista_atual:
-                estilo = lista_atual.format().style()
-                nivel_atual = lista_atual.format().indent()
-                novo_nivel = nivel_atual - 1 if e_shift_tab else nivel_atual + 1
+            if cursor.currentList():
+                doc = self.document()
+                inicio = min(cursor.anchor(), cursor.position())
+                fim = max(cursor.anchor(), cursor.position())
+                bloco = doc.findBlock(inicio)
+                ultimo = doc.findBlock(fim)
+                blocos = []
+                while bloco.isValid():
+                    blocos.append(bloco)
+                    if bloco.position() >= ultimo.position():
+                        break
+                    bloco = bloco.next()
 
-                cursor.beginEditBlock()
-                if novo_nivel < 1:
-                    lista_atual.remove(cursor.block())
-                else:
-                    fmt = QTextListFormat()
-                    fmt.setStyle(estilo)
-                    fmt.setIndent(novo_nivel)
-                    cursor.createList(fmt)
-                cursor.endEditBlock()
+                edicao = QTextCursor(doc)
+                edicao.beginEditBlock()
+                for b in blocos:
+                    lista = b.textList()
+                    if lista is None:
+                        continue
+                    nivel = lista.format().indent()
+                    novo_nivel = nivel - 1 if e_shift_tab else nivel + 1
+                    if novo_nivel < 1:
+                        lista.remove(b)
+                    elif novo_nivel <= 9:
+                        fmt = QTextListFormat()
+                        fmt.setStyle(lista.format().style())
+                        fmt.setIndent(novo_nivel)
+                        QTextCursor(b).createList(fmt)
+                edicao.endEditBlock()
+                # A numeração composta (1.1, 2.1.3...) é ajustada logo em
+                # seguida pelo renumerador, que reage a qualquer mudança.
                 return  # não repassa o Tab pro comportamento padrão
 
         super().keyPressEvent(event)
+
+    # ---------------- Numeração hierárquica (1 / 1.1 / 1.1.1) ----------------
+    def _agendar_renumeracao(self):
+        # Não mexemos no documento dentro do próprio sinal de mudança;
+        # deixamos para o próximo ciclo do laço de eventos.
+        if self._renumerando or self._renumeracao_agendada:
+            return
+        self._renumeracao_agendada = True
+        QTimer.singleShot(0, self._executar_renumeracao)
+
+    def _executar_renumeracao(self):
+        self._renumeracao_agendada = False
+        self.renumerar_listas()
+
+    def renumerar_listas(self):
+        """Distribui os itens de listas numeradas em listas do Qt com o
+        prefixo certo: nível 1 -> "1." ; nível 2 -> "1.1" ; nível 3 ->
+        "1.1.1"... O Qt não tem numeração composta nativa, então cada grupo
+        de filhos do mesmo pai vira uma lista com o prefixo do pai. Só
+        altera o documento se algo estiver fora do lugar."""
+        doc = self.document()
+        modificado_antes = doc.isModified()
+        self._renumerando = True
+        edicao = QTextCursor(doc)
+        edicao_aberta = False
+        try:
+            contadores = []
+            listas = {}            # (nivel, caminho) -> (lista, indice)
+            reivindicados = set()  # índices de listas já em uso
+
+            bloco = doc.begin()
+            while bloco.isValid():
+                lista = bloco.textList()
+                if lista is None or lista.format().style() != QTextListFormat.ListDecimal:
+                    contadores = []
+                    listas = {}
+                    bloco = bloco.next()
+                    continue
+
+                nivel = max(1, lista.format().indent())
+                del contadores[nivel:]
+                while len(contadores) < nivel:
+                    contadores.append(1 if len(contadores) < nivel - 1 else 0)
+                contadores[nivel - 1] += 1
+
+                caminho = tuple(contadores[:nivel - 1])
+                chave = (nivel, caminho)
+                prefixo = ".".join(str(n) for n in caminho) + "." if caminho else ""
+                sufixo = "." if nivel == 1 else ""
+                indice_atual = bloco.blockFormat().objectIndex()
+
+                destino = listas.get(chave)
+                if destino is None:
+                    fmt_atual = lista.format()
+                    reaproveitavel = (
+                        indice_atual not in reivindicados
+                        and fmt_atual.indent() == nivel
+                        and fmt_atual.numberPrefix() == prefixo
+                        and fmt_atual.numberSuffix() == sufixo
+                    )
+                    if reaproveitavel:
+                        destino = (lista, indice_atual)
+                    else:
+                        if not edicao_aberta:
+                            edicao.joinPreviousEditBlock()
+                            edicao_aberta = True
+                        fmt = QTextListFormat()
+                        fmt.setStyle(QTextListFormat.ListDecimal)
+                        fmt.setIndent(nivel)
+                        fmt.setNumberPrefix(prefixo)
+                        fmt.setNumberSuffix(sufixo)
+                        nova_lista = QTextCursor(bloco).createList(fmt)
+                        destino = (nova_lista, bloco.blockFormat().objectIndex())
+                    reivindicados.add(destino[1])
+                    listas[chave] = destino
+                elif indice_atual != destino[1]:
+                    if not edicao_aberta:
+                        edicao.joinPreviousEditBlock()
+                        edicao_aberta = True
+                    destino[0].add(bloco)
+
+                bloco = bloco.next()
+        finally:
+            if edicao_aberta:
+                edicao.endEditBlock()
+            self._renumerando = False
+            if not modificado_antes:
+                doc.setModified(False)
 
 
 class Editor(QMainWindow):
@@ -283,15 +392,15 @@ class Editor(QMainWindow):
         self.acao_alinhar_esquerda = QAction("Esq", self)
         self.acao_alinhar_esquerda.setCheckable(True)
         self.acao_alinhar_esquerda.setChecked(True)  # padrão ao abrir
-        self.acao_alinhar_esquerda.setToolTip("Alinhar à esquerda (Ctrl+L)")
-        self.acao_alinhar_esquerda.setShortcut(QKeySequence("Ctrl+L"))
+        self.acao_alinhar_esquerda.setToolTip("Alinhar à esquerda (Ctrl+Q)")
+        self.acao_alinhar_esquerda.setShortcut(QKeySequence("Ctrl+Q"))
         self.acao_alinhar_esquerda.triggered.connect(
             lambda: self.definir_alinhamento(Qt.AlignLeft)
         )
         grupo_alinhamento.addAction(self.acao_alinhar_esquerda)
         toolbar_paragrafo.addAction(self.acao_alinhar_esquerda)
 
-        self.acao_alinhar_centro = QAction("Centr", self)
+        self.acao_alinhar_centro = QAction("Centr.", self)
         self.acao_alinhar_centro.setCheckable(True)
         self.acao_alinhar_centro.setToolTip("Centralizar (Ctrl+E)")
         self.acao_alinhar_centro.setShortcut(QKeySequence("Ctrl+E"))
@@ -303,8 +412,8 @@ class Editor(QMainWindow):
 
         self.acao_alinhar_direita = QAction("Dir", self)
         self.acao_alinhar_direita.setCheckable(True)
-        self.acao_alinhar_direita.setToolTip("Alinhar à direita (Ctrl+R)")
-        self.acao_alinhar_direita.setShortcut(QKeySequence("Ctrl+R"))
+        self.acao_alinhar_direita.setToolTip("Alinhar à direita (Ctrl+G)")
+        self.acao_alinhar_direita.setShortcut(QKeySequence("Ctrl+G"))
         self.acao_alinhar_direita.triggered.connect(
             lambda: self.definir_alinhamento(Qt.AlignRight)
         )
