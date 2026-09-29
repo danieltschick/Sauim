@@ -8,10 +8,12 @@ página). HTML e TXT continuam disponíveis como formatos de exportação.
 """
 import sys
 import json
-from PySide6.QtCore import Qt, QSizeF, QMarginsF, QTimer
+import base64
+from PySide6.QtCore import Qt, QSizeF, QMarginsF, QTimer, QBuffer, QIODevice, QRect
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
-    QColor, QAction, QKeySequence, QPageLayout, QPageSize
+    QColor, QAction, QKeySequence, QPageLayout, QPageSize, QImage,
+    QTextImageFormat
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
@@ -36,6 +38,8 @@ MARGIN_PX = MARGIN_MM * MM_TO_PX
 NOME_APP = "Sauim"
 EXTENSAO_NATIVA = ".saui"
 VERSAO_FORMATO = 1
+
+TAMANHO_ALCA_PX = 8  # tamanho do quadradinho de redimensionar imagem
 
 
 class PagedTextEdit(QTextEdit):
@@ -63,6 +67,155 @@ class PagedTextEdit(QTextEdit):
         self._renumeracao_agendada = False
         self.document().contentsChanged.connect(self._agendar_renumeracao)
 
+        # Redimensionamento de imagem por arraste
+        self._imagem_selecionada_pos = None
+        self._redimensionando = False
+        self._alca_ativa = None
+        self._ponto_inicio_arraste = None
+        self._retangulo_inicio = None
+        self.setMouseTracking(True)
+
+    def canInsertFromMimeData(self, source):
+        if source.hasImage():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):
+        if source.hasImage():
+            imagem = QImage(source.imageData())
+            if not imagem.isNull():
+                self._inserir_imagem(imagem)
+                return
+        super().insertFromMimeData(source)
+
+    def _inserir_imagem(self, imagem):
+        # Limita a largura da imagem à área útil da página (largura menos
+        # as margens), pra não sair maior que a folha.
+        largura_maxima = int(PAGE_WIDTH_PX - 2 * MARGIN_PX)
+        if imagem.width() > largura_maxima:
+            imagem = imagem.scaledToWidth(largura_maxima, Qt.SmoothTransformation)
+
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        imagem.save(buffer, "PNG")
+        dados_base64 = base64.b64encode(buffer.data().data()).decode("ascii")
+        buffer.close()
+
+        # Usar a própria data URI como "nome" do recurso faz o Qt escrever
+        # a imagem embutida direto no HTML exportado (toHtml()/.saui),
+        # em vez de uma referência externa que se perderia ao reabrir o
+        # arquivo em outro computador.
+        uri = f"data:image/png;base64,{dados_base64}"
+        cursor = self.textCursor()
+        cursor.insertImage(imagem, uri)
+
+    # ---------------- Seleção e redimensionamento de imagem ----------------
+    def _posicao_imagem_no_ponto(self, ponto):
+        """Retorna a posição (índice do caractere) da imagem sob o ponto
+        dado no viewport, ou None se não houver imagem ali."""
+        cursor_aprox = self.cursorForPosition(ponto)
+        for pos in (cursor_aprox.position(), cursor_aprox.position() - 1):
+            if 0 <= pos < self.document().characterCount() - 1:
+                c = QTextCursor(self.document())
+                c.setPosition(pos)
+                c.setPosition(pos + 1, QTextCursor.KeepAnchor)
+                if c.charFormat().isImageFormat():
+                    rect = self._retangulo_imagem(pos)
+                    if rect.adjusted(-2, -2, 2, 2).contains(ponto):
+                        return pos
+        return None
+
+    def _retangulo_imagem(self, pos):
+        """Estima o retângulo (no viewport) ocupado pela imagem que está
+        na posição pos, usando o cursor antes/depois dela como referência."""
+        cursor_antes = QTextCursor(self.document())
+        cursor_antes.setPosition(pos)
+        rect_antes = self.cursorRect(cursor_antes)
+
+        cursor_depois = QTextCursor(self.document())
+        cursor_depois.setPosition(pos + 1)
+        rect_depois = self.cursorRect(cursor_depois)
+
+        largura = rect_depois.left() - rect_antes.left()
+        return QRect(rect_antes.left(), rect_antes.top(), largura, rect_antes.height())
+
+    def _alca_sob_ponto(self, ponto):
+        if self._imagem_selecionada_pos is None:
+            return None
+        rect = self._retangulo_imagem(self._imagem_selecionada_pos)
+        metade = TAMANHO_ALCA_PX // 2
+        alcas = {
+            "tl": rect.topLeft(),
+            "tr": rect.topRight(),
+            "bl": rect.bottomLeft(),
+            "br": rect.bottomRight(),
+        }
+        for nome, centro in alcas.items():
+            alvo = QRect(centro.x() - metade, centro.y() - metade, TAMANHO_ALCA_PX, TAMANHO_ALCA_PX)
+            if alvo.contains(ponto):
+                return nome
+        return None
+
+    def mousePressEvent(self, event):
+        alca = self._alca_sob_ponto(event.pos())
+        if alca:
+            self._redimensionando = True
+            self._alca_ativa = alca
+            self._ponto_inicio_arraste = event.pos()
+            self._retangulo_inicio = self._retangulo_imagem(self._imagem_selecionada_pos)
+            return
+
+        nova_selecao = self._posicao_imagem_no_ponto(event.pos())
+        self._imagem_selecionada_pos = nova_selecao
+        self.viewport().update()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._redimensionando:
+            self._atualizar_redimensionamento(event.pos())
+            return
+
+        if self._alca_sob_ponto(event.pos()):
+            self.viewport().setCursor(Qt.SizeFDiagCursor)
+        else:
+            self.viewport().unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._redimensionando:
+            self._redimensionando = False
+            self._alca_ativa = None
+            return
+        super().mouseReleaseEvent(event)
+
+    def _atualizar_redimensionamento(self, ponto):
+        dx = ponto.x() - self._ponto_inicio_arraste.x()
+        dy = ponto.y() - self._ponto_inicio_arraste.y()
+        r = self._retangulo_inicio
+
+        largura, altura = r.width(), r.height()
+        if self._alca_ativa == "br":
+            largura, altura = r.width() + dx, r.height() + dy
+        elif self._alca_ativa == "bl":
+            largura, altura = r.width() - dx, r.height() + dy
+        elif self._alca_ativa == "tr":
+            largura, altura = r.width() + dx, r.height() - dy
+        elif self._alca_ativa == "tl":
+            largura, altura = r.width() - dx, r.height() - dy
+
+        largura = max(20, int(largura))
+        altura = max(20, int(altura))
+
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(self._imagem_selecionada_pos)
+        cursor.setPosition(self._imagem_selecionada_pos + 1, QTextCursor.KeepAnchor)
+        fmt = cursor.charFormat().toImageFormat()
+        fmt.setWidth(largura)
+        fmt.setHeight(altura)
+        cursor.setCharFormat(fmt)
+
+        self.viewport().update()
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self.viewport())
@@ -74,6 +227,19 @@ class PagedTextEdit(QTextEdit):
         while y < self.viewport().height():
             painter.drawLine(0, int(y), self.viewport().width(), int(y))
             y += page_height
+
+        if self._imagem_selecionada_pos is not None:
+            rect = self._retangulo_imagem(self._imagem_selecionada_pos)
+            painter.setPen(QPen(QColor(0, 120, 215), 1, Qt.SolidLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+
+            painter.setBrush(QColor(0, 120, 215))
+            metade = TAMANHO_ALCA_PX // 2
+            for ponto in (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()):
+                painter.drawRect(ponto.x() - metade, ponto.y() - metade,
+                                  TAMANHO_ALCA_PX, TAMANHO_ALCA_PX)
+
         painter.end()
 
     def page_count(self):
