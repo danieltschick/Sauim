@@ -172,7 +172,7 @@ class PagedTextEdit(QTextEdit):
 
     def mouseMoveEvent(self, event):
         if self._redimensionando:
-            self._atualizar_redimensionamento(event.pos())
+            self._atualizar_redimensionamento(event.pos(), event.modifiers())
             return
 
         if self._alca_sob_ponto(event.pos()):
@@ -188,7 +188,7 @@ class PagedTextEdit(QTextEdit):
             return
         super().mouseReleaseEvent(event)
 
-    def _atualizar_redimensionamento(self, ponto):
+    def _atualizar_redimensionamento(self, ponto, modificadores=Qt.NoModifier):
         dx = ponto.x() - self._ponto_inicio_arraste.x()
         dy = ponto.y() - self._ponto_inicio_arraste.y()
         r = self._retangulo_inicio
@@ -202,6 +202,15 @@ class PagedTextEdit(QTextEdit):
             largura, altura = r.width() + dx, r.height() - dy
         elif self._alca_ativa == "tl":
             largura, altura = r.width() - dx, r.height() - dy
+
+        # Shift pressionado: trava a proporção original da imagem, usando
+        # a maior variação (largura ou altura) como referência.
+        if bool(modificadores & Qt.ShiftModifier) and r.width() > 0 and r.height() > 0:
+            proporcao = r.width() / r.height()
+            if abs(largura - r.width()) >= abs(altura - r.height()):
+                altura = largura / proporcao
+            else:
+                largura = altura * proporcao
 
         largura = max(20, int(largura))
         altura = max(20, int(altura))
