@@ -9,10 +9,10 @@ página). HTML e TXT continuam disponíveis como formatos de exportação.
 import sys
 import json
 import base64
-from PySide6.QtCore import Qt, QSizeF, QMarginsF, QTimer, QBuffer, QIODevice, QRect
+from PySide6.QtCore import Qt, QSizeF, QTimer, QBuffer, QIODevice, QRect
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
-    QColor, QAction, QKeySequence, QPageLayout, QPageSize, QImage,
+    QColor, QAction, QKeySequence, QPageSize, QImage,
     QTextImageFormat
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
@@ -758,10 +758,14 @@ class Editor(QMainWindow):
     def _preparar_impressora(self):
         printer = QPrinter(QPrinter.HighResolution)
         printer.setPageSize(QPageSize(QPageSize.A4))
-        printer.setPageMargins(
-            QMarginsF(MARGIN_MM, MARGIN_MM, MARGIN_MM, MARGIN_MM),
-            QPageLayout.Millimeter
-        )
+        # fullPage(True) faz a impressora entregar a página inteira pro
+        # documento, sem reservar espaço extra nas bordas — é isso que
+        # impede o Qt de "ter onde" desenhar o número de página sozinho.
+        # A margem visual continua vindo do document.setDocumentMargin(),
+        # já usado pra exibição em tela, então não precisamos (nem
+        # devemos) mexer no tamanho de página do documento pra imprimir —
+        # isso foi o que causou o texto minúsculo na tentativa anterior.
+        printer.setFullPage(True)
         return printer
 
     def imprimir(self):
