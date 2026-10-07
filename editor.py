@@ -7,13 +7,14 @@ Formato nativo: .saui (JSON contendo o HTML do documento + metadados de
 página). HTML e TXT continuam disponíveis como formatos de exportação.
 """
 import sys
+import os
 import json
 import base64
 from PySide6.QtCore import Qt, QSizeF, QTimer, QBuffer, QIODevice, QRect
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
     QColor, QAction, QKeySequence, QPageSize, QImage,
-    QTextImageFormat
+    QTextImageFormat, QIcon
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
@@ -40,6 +41,14 @@ EXTENSAO_NATIVA = ".saui"
 VERSAO_FORMATO = 1
 
 TAMANHO_ALCA_PX = 8  # tamanho do quadradinho de redimensionar imagem
+
+
+def caminho_recurso(nome_arquivo):
+    """Encontra um arquivo ao lado do script — e também funciona depois de
+    empacotado com o PyInstaller (que extrai os arquivos embutidos numa
+    pasta temporária indicada por sys._MEIPASS)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, nome_arquivo)
 
 
 class PagedTextEdit(QTextEdit):
@@ -394,6 +403,10 @@ class Editor(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{NOME_APP} — Sem título")
         self.resize(1000, 800)
+
+        icone = caminho_recurso("sauim.ico")
+        if os.path.exists(icone):
+            self.setWindowIcon(QIcon(icone))
 
         self.current_path = None
 
@@ -919,6 +932,9 @@ class Editor(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    icone = caminho_recurso("sauim.ico")
+    if os.path.exists(icone):
+        app.setWindowIcon(QIcon(icone))
     janela = Editor()
     janela.show()
     sys.exit(app.exec())
