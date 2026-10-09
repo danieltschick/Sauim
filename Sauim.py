@@ -20,20 +20,24 @@ from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QToolBar, QFileDialog,
     QMessageBox, QStatusBar, QWidget, QVBoxLayout, QFontComboBox, QComboBox,
-    QColorDialog, QLabel
+    QColorDialog, QLabel, QDialog, QDialogButtonBox, QFormLayout, QDoubleSpinBox
 )
 from PySide6.QtGui import QActionGroup, QIntValidator, QIcon, QPixmap, QTextListFormat
 
 # ---------- Configurações de página (em milímetros) ----------
 MM_TO_PX = 96 / 25.4  # 96 DPI (padrão de tela)
 
-PAGE_WIDTH_MM = 210     # A4
-PAGE_HEIGHT_MM = 297
-MARGIN_MM = 25          # margem uniforme (2,5 cm) - simples por enquanto
+PAGE_WIDTH_MM_PADRAO = 210     # A4 — usado só como valor inicial;
+PAGE_HEIGHT_MM_PADRAO = 297    # o tamanho de página real agora é
+MARGIN_MM_PADRAO = 25          # configurável por documento (veja
+                                # PagedTextEdit.configurar_pagina).
 
-PAGE_WIDTH_PX = PAGE_WIDTH_MM * MM_TO_PX
-PAGE_HEIGHT_PX = PAGE_HEIGHT_MM * MM_TO_PX
-MARGIN_PX = MARGIN_MM * MM_TO_PX
+# Papéis predefinidos: nome -> (largura_mm, altura_mm)
+PAPEIS_PREDEFINIDOS = {
+    "A4 (210 × 297 mm)": (210.0, 297.0),
+    "Carta / Letter (215,9 × 279,4 mm)": (215.9, 279.4),
+    "Ofício / Legal (215,9 × 355,6 mm)": (215.9, 355.6),
+}
 
 # ---------- Formato nativo do Sauim ----------
 NOME_APP = "Sauim"
@@ -65,11 +69,11 @@ class PagedTextEdit(QTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._reaplicacao_agendada = False
         self.setLineWrapMode(QTextEdit.FixedPixelWidth)
-        self.setLineWrapColumnOrWidth(int(PAGE_WIDTH_PX))
-        self.document().setDocumentMargin(MARGIN_PX)
-        self.setFixedWidth(int(PAGE_WIDTH_PX) + 4)
-        self.document().setPageSize(QSizeF(PAGE_WIDTH_PX, PAGE_HEIGHT_PX))
+        self.configurar_pagina(
+            PAGE_WIDTH_MM_PADRAO, PAGE_HEIGHT_MM_PADRAO, MARGIN_MM_PADRAO
+        )
 
         # Renumeração hierárquica de listas numeradas (1 / 1.1 / 1.1.1)
         self._renumerando = False
@@ -83,6 +87,51 @@ class PagedTextEdit(QTextEdit):
         self._ponto_inicio_arraste = None
         self._retangulo_inicio = None
         self.setMouseTracking(True)
+
+    def configurar_pagina(self, largura_mm, altura_mm, margem_mm):
+        """Define o tamanho da página (e a margem uniforme) em milímetros e
+        aplica tudo que depende disso: largura de quebra de linha do texto,
+        margem interna do documento e tamanho de página usado na contagem
+        de páginas. Pode ser chamado a qualquer momento (por exemplo, ao
+        abrir um arquivo ou pelo diálogo "Configurar página")."""
+        self.largura_mm = float(largura_mm)
+        self.altura_mm = float(altura_mm)
+        self.margem_mm = float(margem_mm)
+
+        self.largura_px = self.largura_mm * MM_TO_PX
+        self.altura_px = self.altura_mm * MM_TO_PX
+        self.margem_px = self.margem_mm * MM_TO_PX
+
+        self.setLineWrapColumnOrWidth(int(self.largura_px))
+        self.setFixedWidth(int(self.largura_px) + 4)
+        self.document().setDocumentMargin(self.margem_px)
+        self.document().setPageSize(QSizeF(self.largura_px, self.altura_px))
+        self.viewport().update()
+
+    def _conferir_tamanho_pagina(self):
+        """Autocorreção: se, por qualquer motivo, o Qt tiver alterado o
+        tamanho de página do documento (ele redefine esse valor em alguns
+        momentos por conta própria), agenda a reaplicação. É chamado a cada
+        repintura; quando está tudo certo, custa só uma comparação. A
+        correção é adiada para o próximo ciclo de eventos, pra não mexer
+        no documento no meio de um desenho."""
+        esperado = QSizeF(self.largura_px, self.altura_px)
+        if self.document().pageSize() != esperado and not self._reaplicacao_agendada:
+            self._reaplicacao_agendada = True
+            QTimer.singleShot(0, self._executar_reaplicacao)
+
+    def _executar_reaplicacao(self):
+        self._reaplicacao_agendada = False
+        self.reaplicar_tamanho_pagina()
+
+    def reaplicar_tamanho_pagina(self):
+        """Reaplica o tamanho de página ao documento, sempre (sem comparar
+        antes), o que também obriga o layout a ser refeito com a paginação
+        correta. Deve ser chamado depois de carregar um texto novo
+        (abrir arquivo, novo documento), que é quando a paginação na tela
+        aparece errada."""
+        self.document().setPageSize(QSizeF(self.largura_px, self.altura_px))
+        self.viewport().update()
 
     def canInsertFromMimeData(self, source):
         if source.hasImage():
@@ -100,7 +149,7 @@ class PagedTextEdit(QTextEdit):
     def _inserir_imagem(self, imagem):
         # Limita a largura da imagem à área útil da página (largura menos
         # as margens), pra não sair maior que a folha.
-        largura_maxima = int(PAGE_WIDTH_PX - 2 * MARGIN_PX)
+        largura_maxima = int(self.largura_px - 2 * self.margem_px)
         if imagem.width() > largura_maxima:
             imagem = imagem.scaledToWidth(largura_maxima, Qt.SmoothTransformation)
 
@@ -235,11 +284,12 @@ class PagedTextEdit(QTextEdit):
         self.viewport().update()
 
     def paintEvent(self, event):
+        self._conferir_tamanho_pagina()
         super().paintEvent(event)
         painter = QPainter(self.viewport())
         painter.setPen(QPen(QColor(180, 180, 180), 1, Qt.DashLine))
 
-        page_height = PAGE_HEIGHT_PX
+        page_height = self.altura_px
         offset = self.verticalScrollBar().value()
         y = page_height - (offset % page_height)
         while y < self.viewport().height():
@@ -398,6 +448,106 @@ class PagedTextEdit(QTextEdit):
                 doc.setModified(False)
 
 
+class ConfigurarPaginaDialog(QDialog):
+    """Diálogo para escolher o tamanho do papel, a orientação e a margem."""
+
+    PERSONALIZADO = "Personalizado"
+
+    def __init__(self, largura_mm, altura_mm, margem_mm, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configurar página")
+
+        self.combo_papel = QComboBox()
+        self.combo_papel.addItems(list(PAPEIS_PREDEFINIDOS.keys()) + [self.PERSONALIZADO])
+
+        self.combo_orientacao = QComboBox()
+        self.combo_orientacao.addItems(["Retrato", "Paisagem"])
+
+        self.spin_largura = QDoubleSpinBox()
+        self.spin_altura = QDoubleSpinBox()
+        for spin in (self.spin_largura, self.spin_altura):
+            spin.setRange(50.0, 1000.0)
+            spin.setDecimals(1)
+            spin.setSuffix(" mm")
+
+        self.spin_margem = QDoubleSpinBox()
+        self.spin_margem.setRange(0.0, 100.0)
+        self.spin_margem.setDecimals(1)
+        self.spin_margem.setSuffix(" mm")
+        self.spin_margem.setValue(margem_mm)
+
+        formulario = QFormLayout()
+        formulario.addRow("Papel:", self.combo_papel)
+        formulario.addRow("Orientação:", self.combo_orientacao)
+        formulario.addRow("Largura:", self.spin_largura)
+        formulario.addRow("Altura:", self.spin_altura)
+        formulario.addRow("Margem (todos os lados):", self.spin_margem)
+
+        botoes = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        botoes.accepted.connect(self._validar_e_aceitar)
+        botoes.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(formulario)
+        layout.addWidget(botoes)
+
+        self._selecionar_papel_atual(largura_mm, altura_mm)
+        self.combo_papel.currentIndexChanged.connect(self._atualizar_campos)
+        self.combo_orientacao.currentIndexChanged.connect(self._atualizar_campos)
+        self._atualizar_campos()
+
+    def _selecionar_papel_atual(self, largura_mm, altura_mm):
+        """Pré-seleciona o papel/orientação que correspondem à página atual
+        (ou 'Personalizado' se não bater com nenhum predefinido)."""
+        for nome, (larg, alt) in PAPEIS_PREDEFINIDOS.items():
+            if abs(largura_mm - larg) < 0.1 and abs(altura_mm - alt) < 0.1:
+                self.combo_papel.setCurrentText(nome)
+                self.combo_orientacao.setCurrentText("Retrato")
+                return
+            if abs(largura_mm - alt) < 0.1 and abs(altura_mm - larg) < 0.1:
+                self.combo_papel.setCurrentText(nome)
+                self.combo_orientacao.setCurrentText("Paisagem")
+                return
+        self.combo_papel.setCurrentText(self.PERSONALIZADO)
+        self.spin_largura.setValue(largura_mm)
+        self.spin_altura.setValue(altura_mm)
+
+    def _atualizar_campos(self):
+        papel = self.combo_papel.currentText()
+        personalizado = papel == self.PERSONALIZADO
+
+        # Largura/altura só são editáveis no modo personalizado;
+        # orientação só faz sentido para papéis predefinidos.
+        self.spin_largura.setEnabled(personalizado)
+        self.spin_altura.setEnabled(personalizado)
+        self.combo_orientacao.setEnabled(not personalizado)
+
+        if not personalizado:
+            larg, alt = PAPEIS_PREDEFINIDOS[papel]
+            if self.combo_orientacao.currentText() == "Paisagem":
+                larg, alt = alt, larg
+            self.spin_largura.setValue(larg)
+            self.spin_altura.setValue(alt)
+
+    def _validar_e_aceitar(self):
+        menor_lado = min(self.spin_largura.value(), self.spin_altura.value())
+        if self.spin_margem.value() * 2 >= menor_lado:
+            QMessageBox.warning(
+                self, "Margem inválida",
+                "A margem é grande demais para esse tamanho de papel — "
+                "não sobraria espaço para o texto."
+            )
+            return
+        self.accept()
+
+    def valores(self):
+        return (
+            self.spin_largura.value(),
+            self.spin_altura.value(),
+            self.spin_margem.value(),
+        )
+
+
 class Editor(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -454,6 +604,10 @@ class Editor(QMainWindow):
         menu_arquivo.addAction(acao_salvar_como)
 
         menu_arquivo.addSeparator()
+
+        acao_config_pagina = QAction("Configurar página...", self)
+        acao_config_pagina.triggered.connect(self.configurar_pagina_dialogo)
+        menu_arquivo.addAction(acao_config_pagina)
 
         acao_imprimir = QAction("Imprimir...", self)
         acao_imprimir.setShortcut(QKeySequence.Print)
@@ -670,6 +824,7 @@ class Editor(QMainWindow):
     def novo_arquivo(self):
         if self._confirmar_descarte():
             self.text_edit.clear()
+            self.text_edit.reaplicar_tamanho_pagina()
             self.current_path = None
             self.setWindowTitle(f"{NOME_APP} — Sem título")
 
@@ -687,10 +842,15 @@ class Editor(QMainWindow):
             if caminho.lower().endswith(EXTENSAO_NATIVA):
                 with open(caminho, "r", encoding="utf-8") as f:
                     dados = json.load(f)
+                # Aplica primeiro o tamanho de página gravado no arquivo,
+                # pra o texto já ser carregado com a largura certa.
+                pagina = dados.get("pagina", {})
+                self.text_edit.configurar_pagina(
+                    pagina.get("largura_mm", PAGE_WIDTH_MM_PADRAO),
+                    pagina.get("altura_mm", PAGE_HEIGHT_MM_PADRAO),
+                    pagina.get("margem_mm", MARGIN_MM_PADRAO),
+                )
                 self.text_edit.setHtml(dados.get("conteudo_html", ""))
-                # Metadados de página (largura/altura/margem) ficam salvos
-                # no arquivo para uso futuro; a v1 ainda usa os valores
-                # fixos definidos no topo do arquivo.
             elif caminho.lower().endswith(".html"):
                 with open(caminho, "r", encoding="utf-8") as f:
                     self.text_edit.setHtml(f.read())
@@ -700,6 +860,7 @@ class Editor(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Erro ao abrir", str(e))
             return
+        self.text_edit.reaplicar_tamanho_pagina()
         self.current_path = caminho
         self.text_edit.document().setModified(False)
         self.setWindowTitle(f"{NOME_APP} — {caminho}")
@@ -734,9 +895,9 @@ class Editor(QMainWindow):
                     "versao": VERSAO_FORMATO,
                     "conteudo_html": self.text_edit.toHtml(),
                     "pagina": {
-                        "largura_mm": PAGE_WIDTH_MM,
-                        "altura_mm": PAGE_HEIGHT_MM,
-                        "margem_mm": MARGIN_MM,
+                        "largura_mm": self.text_edit.largura_mm,
+                        "altura_mm": self.text_edit.altura_mm,
+                        "margem_mm": self.text_edit.margem_mm,
                     },
                 }
                 with open(caminho, "w", encoding="utf-8") as f:
@@ -768,9 +929,28 @@ class Editor(QMainWindow):
         return resposta == QMessageBox.Discard
 
     # ---------------- Impressão ----------------
+    def configurar_pagina_dialogo(self):
+        dialogo = ConfigurarPaginaDialog(
+            self.text_edit.largura_mm,
+            self.text_edit.altura_mm,
+            self.text_edit.margem_mm,
+            self,
+        )
+        if dialogo.exec() == QDialog.Accepted:
+            largura, altura, margem = dialogo.valores()
+            self.text_edit.configurar_pagina(largura, altura, margem)
+            # o tamanho da página é salvo junto com o documento
+            self.text_edit.document().setModified(True)
+            self._atualizar_status()
+
     def _preparar_impressora(self):
         printer = QPrinter(QPrinter.HighResolution)
-        printer.setPageSize(QPageSize(QPageSize.A4))
+        printer.setPageSize(
+            QPageSize(
+                QSizeF(self.text_edit.largura_mm, self.text_edit.altura_mm),
+                QPageSize.Millimeter,
+            )
+        )
         # fullPage(True) faz a impressora entregar a página inteira pro
         # documento, sem reservar espaço extra nas bordas — é isso que
         # impede o Qt de "ter onde" desenhar o número de página sozinho.
@@ -937,6 +1117,8 @@ def main():
         app.setWindowIcon(QIcon(icone))
     janela = Editor()
     janela.show()
+    # Depois que a janela já apareceu e o primeiro ciclo de eventos rodou.
+    QTimer.singleShot(0, janela.text_edit.reaplicar_tamanho_pagina)
     sys.exit(app.exec())
 
 
