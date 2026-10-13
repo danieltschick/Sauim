@@ -9,18 +9,22 @@ página). HTML e TXT continuam disponíveis como formatos de exportação.
 import sys
 import os
 import json
+import math
 import base64
-from PySide6.QtCore import Qt, QSizeF, QTimer, QBuffer, QIODevice, QRect
+from PySide6.QtCore import (
+    Qt, QSizeF, QTimer, QBuffer, QIODevice, QRect, QRectF, QPoint, QPointF, Signal
+)
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
     QColor, QAction, QKeySequence, QPageSize, QImage,
-    QTextImageFormat, QIcon
+    QTextImageFormat, QIcon, QBrush, QTransform
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QToolBar, QFileDialog,
-    QMessageBox, QStatusBar, QWidget, QVBoxLayout, QFontComboBox, QComboBox,
-    QColorDialog, QLabel, QDialog, QDialogButtonBox, QFormLayout, QDoubleSpinBox
+    QMessageBox, QStatusBar, QVBoxLayout, QFontComboBox, QComboBox,
+    QColorDialog, QLabel, QDialog, QDialogButtonBox, QFormLayout, QDoubleSpinBox,
+    QGraphicsView, QGraphicsScene, QFrame, QSlider, QToolButton
 )
 from PySide6.QtGui import QActionGroup, QIntValidator, QIcon, QPixmap, QTextListFormat
 
@@ -67,9 +71,17 @@ class PagedTextEdit(QTextEdit):
     digitação e fazia a paginação da tela não bater com a da impressão.
     """
 
+    # Emitido sempre que o tamanho da página muda (a vista com zoom escuta
+    # isso para acompanhar o tamanho da folha).
+    pagina_configurada = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._reaplicacao_agendada = False
+        # Quanto o PageUp/PageDown deve andar, em pixels do documento. Quem
+        # sabe o tamanho da janela é a vista com zoom (VisaoPagina), que
+        # mantém este valor atualizado. Com 0, vale o comportamento padrão.
+        self.passo_pagina_px = 0
         self.setLineWrapMode(QTextEdit.FixedPixelWidth)
         self.configurar_pagina(
             PAGE_WIDTH_MM_PADRAO, PAGE_HEIGHT_MM_PADRAO, MARGIN_MM_PADRAO
@@ -87,6 +99,12 @@ class PagedTextEdit(QTextEdit):
         self._ponto_inicio_arraste = None
         self._retangulo_inicio = None
         self.setMouseTracking(True)
+
+        # Configurar a margem e o tamanho da página acima conta, para o Qt,
+        # como "alteração do documento". Um documento recém-criado, porém,
+        # não foi modificado pelo usuário: começa limpo, para o Sauim não
+        # perguntar se quer salvar quando nada foi digitado.
+        self.document().setModified(False)
 
     def configurar_pagina(self, largura_mm, altura_mm, margem_mm):
         """Define o tamanho da página (e a margem uniforme) em milímetros e
@@ -107,6 +125,7 @@ class PagedTextEdit(QTextEdit):
         self.document().setDocumentMargin(self.margem_px)
         self.document().setPageSize(QSizeF(self.largura_px, self.altura_px))
         self.viewport().update()
+        self.pagina_configurada.emit()
 
     def _conferir_tamanho_pagina(self):
         """Autocorreção: se, por qualquer motivo, o Qt tiver alterado o
@@ -129,8 +148,11 @@ class PagedTextEdit(QTextEdit):
         antes), o que também obriga o layout a ser refeito com a paginação
         correta. Deve ser chamado depois de carregar um texto novo
         (abrir arquivo, novo documento), que é quando a paginação na tela
-        aparece errada."""
+        aparece errada. Não altera o estado "modificado" do documento."""
+        modificado_antes = self.document().isModified()
         self.document().setPageSize(QSizeF(self.largura_px, self.altura_px))
+        if not modificado_antes:
+            self.document().setModified(False)
         self.viewport().update()
 
     def canInsertFromMimeData(self, source):
@@ -314,6 +336,23 @@ class PagedTextEdit(QTextEdit):
         return max(1, self.document().pageCount())
 
     def keyPressEvent(self, event):
+        # PageUp/PageDown: o editor tem a altura do documento inteiro (quem
+        # rola é a vista com zoom), então o comportamento padrão não
+        # serviria. Andamos a altura visível da janela, mantendo a mesma
+        # coluna; com Shift, estendemos a seleção.
+        if event.key() in (Qt.Key_PageUp, Qt.Key_PageDown) and self.passo_pagina_px > 0:
+            sinal = -1 if event.key() == Qt.Key_PageUp else 1
+            cursor = self.textCursor()
+            r = self.cursorRect(cursor)
+            alvo = QPoint(r.center().x(), int(r.center().y() + sinal * self.passo_pagina_px))
+            novo_cursor = self.cursorForPosition(alvo)
+            modo = (QTextCursor.KeepAnchor
+                    if event.modifiers() & Qt.ShiftModifier
+                    else QTextCursor.MoveAnchor)
+            cursor.setPosition(novo_cursor.position(), modo)
+            self.setTextCursor(cursor)
+            return
+
         # Tab/Shift+Tab só tem um comportamento especial quando o cursor
         # está dentro de uma lista (marcadores ou numeração); fora de uma
         # lista, o Tab funciona normalmente (insere uma tabulação).
@@ -448,6 +487,165 @@ class PagedTextEdit(QTextEdit):
                 doc.setModified(False)
 
 
+# ---------- Zoom ----------
+ZOOM_MIN = 0.25
+ZOOM_MAX = 4.0
+ZOOM_PASSOS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25,
+               1.5, 1.75, 2.0, 2.5, 3.0, 4.0]
+MARGEM_MESA_PX = 24   # espaço entre a folha e a borda da janela
+
+
+class VisaoPagina(QGraphicsView):
+    """Área central do Sauim: mostra a folha (o PagedTextEdit) sobre um
+    fundo cinza e permite ampliar/reduzir com zoom.
+
+    Como funciona: o editor é colocado dentro de uma cena gráfica
+    (QGraphicsProxyWidget) e o zoom é uma transformação de escala da vista.
+    Assim TUDO escala junto — texto, margens, imagens, quebras de página —
+    sem tocar no documento: o zoom não é salvo nem afeta a impressão.
+
+    O editor não rola sozinho: ele cresce até a altura do documento
+    (sempre em páginas inteiras) e quem rola é esta vista."""
+
+    zoom_alterado = Signal(float)
+
+    def __init__(self, editor, parent=None):
+        super().__init__(parent)
+        self._editor = editor
+        self._zoom = 1.0
+        self._ajuste_agendado = False
+
+        editor.setFrameShape(QFrame.NoFrame)
+        editor.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self._cena = QGraphicsScene(self)
+        self._sombra = self._cena.addRect(
+            QRectF(), QPen(Qt.NoPen), QBrush(QColor(150, 150, 150))
+        )
+        self._sombra.setZValue(-1)
+        self._proxy = self._cena.addWidget(editor)
+        self.setScene(self._cena)
+
+        self.setBackgroundBrush(QBrush(QColor(200, 200, 200)))
+        self.setFrameShape(QFrame.NoFrame)
+        self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self.setRenderHint(QPainter.TextAntialiasing, True)
+        self.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+
+        editor.pagina_configurada.connect(self.atualizar_geometria)
+        editor.document().documentLayout().documentSizeChanged.connect(
+            self._agendar_ajuste
+        )
+        editor.cursorPositionChanged.connect(self._agendar_cursor_visivel)
+
+        self.atualizar_geometria()
+        self._atualizar_passo_pagina()
+
+    # ---------------- Geometria da folha ----------------
+    def atualizar_geometria(self):
+        """Ajusta a altura do editor (páginas inteiras), a cena e a sombra
+        ao tamanho atual da página e do documento."""
+        editor = self._editor
+        altura_pagina = editor.altura_px
+        altura_documento = editor.document().size().height()
+        paginas = max(1, math.ceil(altura_documento / altura_pagina - 1e-6))
+        altura = int(round(paginas * altura_pagina))
+
+        if editor.height() != altura:
+            editor.setFixedHeight(altura)
+        largura = editor.width()
+        self._proxy.resize(largura, altura)
+
+        m = MARGEM_MESA_PX
+        self._cena.setSceneRect(QRectF(-m, -m, largura + 2 * m, altura + 2 * m))
+        self._sombra.setRect(QRectF(4, 4, largura, altura))
+
+    def _agendar_ajuste(self, _tamanho=None):
+        # O tamanho do documento muda a cada linha digitada; juntamos tudo
+        # num único ajuste por ciclo de eventos.
+        if self._ajuste_agendado:
+            return
+        self._ajuste_agendado = True
+        QTimer.singleShot(0, self._executar_ajuste)
+
+    def _executar_ajuste(self):
+        self._ajuste_agendado = False
+        self.atualizar_geometria()
+
+    # ---------------- Cursor sempre visível ----------------
+    def _agendar_cursor_visivel(self):
+        QTimer.singleShot(0, self.garantir_cursor_visivel)
+
+    def garantir_cursor_visivel(self):
+        """Rola a vista para o cursor de texto continuar à mostra (o editor
+        em si não rola mais, então isso é feito aqui)."""
+        r = self._editor.cursorRect()
+        p = self._proxy.mapToScene(QPointF(r.left(), r.top()))
+        self.ensureVisible(
+            QRectF(p.x(), p.y(), max(r.width(), 1), r.height()), 40, 40
+        )
+
+    # ---------------- Zoom ----------------
+    def zoom(self):
+        return self._zoom
+
+    def definir_zoom(self, fator, sob_o_mouse=False):
+        fator = max(ZOOM_MIN, min(ZOOM_MAX, float(fator)))
+        if abs(fator - self._zoom) < 0.001:
+            return
+        self.setTransformationAnchor(
+            QGraphicsView.AnchorUnderMouse if sob_o_mouse
+            else QGraphicsView.AnchorViewCenter
+        )
+        self.setTransform(QTransform.fromScale(fator, fator))
+        self._zoom = fator
+        self._atualizar_passo_pagina()
+        self.zoom_alterado.emit(fator)
+
+    def ajustar_a_largura(self):
+        """Escolhe o zoom em que a folha ocupa a largura da janela."""
+        disponivel = self.viewport().width() - 2 * 16
+        if disponivel > 0 and self._editor.width() > 0:
+            self.definir_zoom(disponivel / self._editor.width())
+
+    def wheelEvent(self, event):
+        # Ctrl + roda do mouse = zoom; só a roda = rolar. Tratamos aqui, em
+        # vez de deixar a cena repassar o evento ao editor embutido.
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta:
+                fator = 1.1 if delta > 0 else 1 / 1.1
+                self.definir_zoom(self._zoom * fator, sob_o_mouse=True)
+            event.accept()
+            return
+
+        barra = self.verticalScrollBar()
+        pixels = event.pixelDelta().y()
+        if pixels:
+            barra.setValue(barra.value() - pixels)
+        else:
+            passos = event.angleDelta().y() / 120
+            barra.setValue(barra.value() - int(passos * 100))
+        event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._atualizar_passo_pagina()
+
+    def _atualizar_passo_pagina(self):
+        # PageUp/PageDown andam 90% da altura visível (em pixels do
+        # documento, ou seja, já descontando o zoom).
+        self._editor.passo_pagina_px = int(
+            self.viewport().height() / self._zoom * 0.9
+        )
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self._proxy.setFocus(Qt.OtherFocusReason)
+
+
 class ConfigurarPaginaDialog(QDialog):
     """Diálogo para escolher o tamanho do papel, a orientação e a margem."""
 
@@ -563,21 +761,20 @@ class Editor(QMainWindow):
         self.text_edit = PagedTextEdit()
         self.text_edit.setFont(QFont("Arial", 11))
 
-        # centraliza a "página" na janela
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setAlignment(Qt.AlignHCenter)
-        layout.addWidget(self.text_edit)
-        self.setCentralWidget(container)
+        # a "folha" fica numa vista com zoom, sobre um fundo cinza
+        self.visao = VisaoPagina(self.text_edit)
+        self.setCentralWidget(self.visao)
 
         self._criar_menus_e_barra()
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+        self._criar_controles_de_zoom()
 
         self.text_edit.textChanged.connect(self._atualizar_status)
         self.text_edit.cursorPositionChanged.connect(self._sincronizar_botoes)
         self._atualizar_status()
+        self.text_edit.setFocus()
 
     # ---------------- Menu / Toolbar ----------------
     def _criar_menus_e_barra(self):
@@ -622,6 +819,30 @@ class Editor(QMainWindow):
         acao_sair = QAction("Sair", self)
         acao_sair.triggered.connect(self.close)
         menu_arquivo.addAction(acao_sair)
+
+        # ---- Exibir (zoom) ----
+        menu_exibir = self.menuBar().addMenu("&Exibir")
+
+        acao_ampliar = QAction("Ampliar", self)
+        acao_ampliar.setShortcuts(
+            [QKeySequence(QKeySequence.ZoomIn), QKeySequence("Ctrl+=")]
+        )
+        acao_ampliar.triggered.connect(self.ampliar_zoom)
+        menu_exibir.addAction(acao_ampliar)
+
+        acao_reduzir = QAction("Reduzir", self)
+        acao_reduzir.setShortcut(QKeySequence(QKeySequence.ZoomOut))
+        acao_reduzir.triggered.connect(self.reduzir_zoom)
+        menu_exibir.addAction(acao_reduzir)
+
+        acao_zoom_100 = QAction("Zoom 100%", self)
+        acao_zoom_100.setShortcut(QKeySequence("Ctrl+0"))
+        acao_zoom_100.triggered.connect(lambda: self.visao.definir_zoom(1.0))
+        menu_exibir.addAction(acao_zoom_100)
+
+        acao_largura = QAction("Ajustar à largura da janela", self)
+        acao_largura.triggered.connect(self.visao.ajustar_a_largura)
+        menu_exibir.addAction(acao_largura)
 
         # ==================== Seção: Fonte ====================
         toolbar_fonte = QToolBar("Fonte")
@@ -825,6 +1046,7 @@ class Editor(QMainWindow):
         if self._confirmar_descarte():
             self.text_edit.clear()
             self.text_edit.reaplicar_tamanho_pagina()
+            self.text_edit.document().setModified(False)
             self.current_path = None
             self.setWindowTitle(f"{NOME_APP} — Sem título")
 
@@ -1097,6 +1319,65 @@ class Editor(QMainWindow):
             acao_correspondente.blockSignals(True)
             acao_correspondente.setChecked(True)
             acao_correspondente.blockSignals(False)
+
+    # ---------------- Zoom ----------------
+    def _criar_controles_de_zoom(self):
+        """Controle de zoom no canto da barra de status: - [slider] + 100%"""
+        botao_menos = QToolButton()
+        botao_menos.setText("−")
+        botao_menos.setAutoRaise(True)
+        botao_menos.setToolTip("Reduzir (Ctrl+-)")
+        botao_menos.clicked.connect(self.reduzir_zoom)
+
+        self.slider_zoom = QSlider(Qt.Horizontal)
+        self.slider_zoom.setRange(int(ZOOM_MIN * 100), int(ZOOM_MAX * 100))
+        self.slider_zoom.setValue(100)
+        self.slider_zoom.setFixedWidth(140)
+        self.slider_zoom.valueChanged.connect(
+            lambda valor: self.visao.definir_zoom(valor / 100)
+        )
+
+        botao_mais = QToolButton()
+        botao_mais.setText("+")
+        botao_mais.setAutoRaise(True)
+        botao_mais.setToolTip("Ampliar (Ctrl++)")
+        botao_mais.clicked.connect(self.ampliar_zoom)
+
+        self.botao_zoom_percentual = QToolButton()
+        self.botao_zoom_percentual.setText("100%")
+        self.botao_zoom_percentual.setAutoRaise(True)
+        self.botao_zoom_percentual.setMinimumWidth(48)
+        self.botao_zoom_percentual.setToolTip("Voltar para 100% (Ctrl+0)")
+        self.botao_zoom_percentual.clicked.connect(
+            lambda: self.visao.definir_zoom(1.0)
+        )
+
+        for widget in (botao_menos, self.slider_zoom, botao_mais,
+                       self.botao_zoom_percentual):
+            self.status.addPermanentWidget(widget)
+
+        self.visao.zoom_alterado.connect(self._atualizar_controles_de_zoom)
+
+    def _atualizar_controles_de_zoom(self, fator):
+        percentual = int(round(fator * 100))
+        self.slider_zoom.blockSignals(True)
+        self.slider_zoom.setValue(percentual)
+        self.slider_zoom.blockSignals(False)
+        self.botao_zoom_percentual.setText(f"{percentual}%")
+
+    def ampliar_zoom(self):
+        atual = self.visao.zoom()
+        for passo in ZOOM_PASSOS:
+            if passo > atual + 0.005:
+                self.visao.definir_zoom(passo)
+                return
+
+    def reduzir_zoom(self):
+        atual = self.visao.zoom()
+        for passo in reversed(ZOOM_PASSOS):
+            if passo < atual - 0.005:
+                self.visao.definir_zoom(passo)
+                return
 
     # ---------------- Status ----------------
     def _atualizar_status(self):
