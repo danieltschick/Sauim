@@ -48,6 +48,19 @@ NOME_APP = "Sauim"
 EXTENSAO_NATIVA = ".saui"
 VERSAO_FORMATO = 1
 
+# Formatos de arquivo oferecidos nos diálogos de abrir/salvar:
+# (descrição, extensão). Os filtros dos diálogos são montados a partir daqui,
+# e a extensão é descoberta pela posição do filtro escolhido — nunca
+# procurando pedaços de texto dentro do nome do filtro.
+FORMATOS_ARQUIVO = [
+    (f"Documento {NOME_APP}", EXTENSAO_NATIVA),
+    ("Documento HTML", ".html"),
+    ("Texto simples", ".txt"),
+]
+FILTROS_ARQUIVO = [
+    f"{descricao} (*{extensao})" for descricao, extensao in FORMATOS_ARQUIVO
+]
+
 TAMANHO_ALCA_PX = 8  # tamanho do quadradinho de redimensionar imagem
 
 
@@ -74,6 +87,9 @@ class PagedTextEdit(QTextEdit):
     # Emitido sempre que o tamanho da página muda (a vista com zoom escuta
     # isso para acompanhar o tamanho da folha).
     pagina_configurada = Signal()
+
+    # Emitido depois de desfazer/refazer, para a vista rolar até o cursor.
+    cursor_restaurado = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -335,7 +351,42 @@ class PagedTextEdit(QTextEdit):
     def page_count(self):
         return max(1, self.document().pageCount())
 
+    def _desfazer_ou_refazer(self, refazer):
+        """Desfaz/refaz e, quando a alteração foi só de formatação (o texto
+        não mudou de tamanho), mantém o cursor e a seleção onde estavam.
+
+        Recuar um nível de lista, por exemplo, só muda a formatação do
+        parágrafo; o cursor não tem motivo nenhum para sair do lugar. Em
+        vez de depender de onde o Qt decide deixar o cursor depois do
+        desfazer, guardamos a posição antes e a restauramos depois."""
+        doc = self.document()
+        cursor = self.textCursor()
+        ancora, posicao = cursor.anchor(), cursor.position()
+        tamanho_antes = doc.characterCount()
+
+        if refazer:
+            self.redo()
+        else:
+            self.undo()
+
+        if doc.characterCount() == tamanho_antes:
+            ultimo = max(0, doc.characterCount() - 1)
+            novo_cursor = QTextCursor(doc)
+            novo_cursor.setPosition(min(ancora, ultimo))
+            novo_cursor.setPosition(min(posicao, ultimo), QTextCursor.KeepAnchor)
+            self.setTextCursor(novo_cursor)
+
+        self.cursor_restaurado.emit()
+
     def keyPressEvent(self, event):
+        # Ctrl+Z / Ctrl+Y: ver _desfazer_ou_refazer.
+        if event.matches(QKeySequence.Undo):
+            self._desfazer_ou_refazer(refazer=False)
+            return
+        if event.matches(QKeySequence.Redo):
+            self._desfazer_ou_refazer(refazer=True)
+            return
+
         # PageUp/PageDown: o editor tem a altura do documento inteiro (quem
         # rola é a vista com zoom), então o comportamento padrão não
         # serviria. Andamos a altura visível da janela, mantendo a mesma
@@ -539,6 +590,7 @@ class VisaoPagina(QGraphicsView):
             self._agendar_ajuste
         )
         editor.cursorPositionChanged.connect(self._agendar_cursor_visivel)
+        editor.cursor_restaurado.connect(self._agendar_cursor_visivel)
 
         self.atualizar_geometria()
         self._atualizar_passo_pagina()
@@ -1051,15 +1103,20 @@ class Editor(QMainWindow):
             self.setWindowTitle(f"{NOME_APP} — Sem título")
 
     def abrir_arquivo(self):
+        """Arquivo > Abrir: pergunta qual arquivo e então o carrega."""
         if not self._confirmar_descarte():
             return
         caminho, _ = QFileDialog.getOpenFileName(
-            self, "Abrir arquivo", "",
-            f"Documento {NOME_APP} (*{EXTENSAO_NATIVA});;"
-            "Documento HTML (*.html);;Texto simples (*.txt)"
+            self, "Abrir arquivo", "", ";;".join(FILTROS_ARQUIVO)
         )
         if not caminho:
             return
+        self.abrir_caminho(caminho)
+
+    def abrir_caminho(self, caminho):
+        """Carrega o arquivo indicado. Usado pelo menu Abrir e também na
+        inicialização, quando o programa é aberto por um duplo clique num
+        arquivo .saui (o Windows passa o caminho como argumento)."""
         try:
             if caminho.lower().endswith(EXTENSAO_NATIVA):
                 with open(caminho, "r", encoding="utf-8") as f:
@@ -1094,19 +1151,24 @@ class Editor(QMainWindow):
             self.salvar_como()
 
     def salvar_como(self):
-        caminho, filtro = QFileDialog.getSaveFileName(
-            self, "Salvar como", "",
-            f"Documento {NOME_APP} (*{EXTENSAO_NATIVA});;"
-            "Documento HTML (*.html);;Texto simples (*.txt)"
+        caminho, filtro_escolhido = QFileDialog.getSaveFileName(
+            self, "Salvar como", "", ";;".join(FILTROS_ARQUIVO)
         )
         if not caminho:
             return
-        if EXTENSAO_NATIVA.strip(".") in filtro.lower() and not caminho.lower().endswith(EXTENSAO_NATIVA):
-            caminho += EXTENSAO_NATIVA
-        elif "html" in filtro.lower() and not caminho.lower().endswith(".html"):
-            caminho += ".html"
-        elif "txt" in filtro.lower() and not caminho.lower().endswith(".txt"):
-            caminho += ".txt"
+
+        # Se o nome já termina numa extensão que conhecemos, vale a que o
+        # usuário digitou. Senão, usamos a do filtro escolhido no diálogo —
+        # achado por comparação exata com a lista que nós mesmos montamos.
+        # Se o diálogo não informar o filtro (algumas plataformas devolvem
+        # vazio), ficamos com o formato nativo, que preserva a formatação.
+        extensoes_conhecidas = tuple(ext for _desc, ext in FORMATOS_ARQUIVO)
+        if not caminho.lower().endswith(extensoes_conhecidas):
+            if filtro_escolhido in FILTROS_ARQUIVO:
+                extensao = FORMATOS_ARQUIVO[FILTROS_ARQUIVO.index(filtro_escolhido)][1]
+            else:
+                extensao = EXTENSAO_NATIVA
+            caminho += extensao
         self._salvar_em(caminho)
 
     def _salvar_em(self, caminho):
@@ -1398,6 +1460,15 @@ def main():
         app.setWindowIcon(QIcon(icone))
     janela = Editor()
     janela.show()
+
+    # Duplo clique num arquivo .saui: o Windows inicia o programa passando o
+    # caminho do arquivo como argumento. Abrimos o primeiro argumento que
+    # seja um arquivo existente (ignorando opções do tipo "-platform ...").
+    for argumento in app.arguments()[1:]:
+        if os.path.isfile(argumento):
+            janela.abrir_caminho(os.path.abspath(argumento))
+            break
+
     # Depois que a janela já apareceu e o primeiro ciclo de eventos rodou.
     QTimer.singleShot(0, janela.text_edit.reaplicar_tamanho_pagina)
     sys.exit(app.exec())
