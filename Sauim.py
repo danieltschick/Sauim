@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QColorDialog, QLabel, QDialog, QDialogButtonBox, QFormLayout, QDoubleSpinBox,
     QGraphicsView, QGraphicsScene, QFrame, QSlider, QToolButton
 )
-from PySide6.QtGui import QActionGroup, QIntValidator, QIcon, QPixmap, QTextListFormat
+from PySide6.QtGui import QActionGroup, QIntValidator, QPixmap, QTextListFormat
 
 # ---------- Configurações de página (em milímetros) ----------
 MM_TO_PX = 96 / 25.4  # 96 DPI (padrão de tela)
