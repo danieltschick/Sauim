@@ -1,0 +1,5 @@
+# Só regras que apontam erros de verdade (nada de estilo):
+#   F401 import sem uso | F811 definição repetida
+#   F821 nome indefinido | F841 variável local sem uso
+[lint]
+select = ["F401", "F811", "F821", "F841"]

@@ -17,7 +17,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
     QColor, QAction, QKeySequence, QPageSize, QImage,
-    QTextImageFormat, QIcon, QBrush, QTransform
+    QTextImageFormat, QIcon, QBrush, QTransform, QTextFormat
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
@@ -59,6 +59,24 @@ FORMATOS_ARQUIVO = [
 ]
 FILTROS_ARQUIVO = [
     f"{descricao} (*{extensao})" for descricao, extensao in FORMATOS_ARQUIVO
+]
+
+# Propriedades do QTextFormat que guardam a família da fonte (o nome mudou
+# entre versões do Qt; usamos as que existirem).
+PROPRIEDADES_FAMILIA = [
+    getattr(QTextFormat, nome)
+    for nome in ("FontFamilies", "FontFamily")
+    if hasattr(QTextFormat, nome)
+]
+
+# Propriedades de tamanho que, se sobrarem num trecho, podem "vencer" o
+# tamanho em pontos na hora de desenhar. Texto colado de páginas da web vem
+# com o tamanho em pixels (e o Qt dá preferência a ele). Por isso elas são
+# removidas ao aplicar um tamanho novo.
+PROPRIEDADES_TAMANHO_CONFLITANTES = [
+    getattr(QTextFormat, nome)
+    for nome in ("FontPixelSize", "FontSizeAdjustment", "FontSizeIncrement")
+    if hasattr(QTextFormat, nome)
 ]
 
 TAMANHO_ALCA_PX = 8  # tamanho do quadradinho de redimensionar imagem
@@ -1321,9 +1339,67 @@ class Editor(QMainWindow):
             return
         if tamanho <= 0:
             return
-        fmt = QTextCharFormat()
-        fmt.setFontPointSize(tamanho)
-        self._aplicar_formato(fmt)
+        self._aplicar_tamanho_em_pontos(tamanho)
+        self.text_edit.setFocus()
+
+    def _trechos_com_tamanho_conflitante(self, inicio, fim):
+        """Lê (sem alterar nada) os trechos de [inicio, fim) que carregam
+        alguma propriedade de tamanho conflitante, como o tamanho em pixels.
+        Devolve uma lista de (inicio, fim, formato). Imagens são ignoradas."""
+        doc = self.text_edit.document()
+        trechos = []
+        bloco = doc.findBlock(inicio)
+        while bloco.isValid() and bloco.position() < fim:
+            it = bloco.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    ini = max(frag.position(), inicio)
+                    fm = min(frag.position() + frag.length(), fim)
+                    fmt = frag.charFormat()
+                    if (ini < fm and not fmt.isImageFormat()
+                            and any(fmt.hasProperty(p) for p in PROPRIEDADES_TAMANHO_CONFLITANTES)):
+                        trechos.append((ini, fm, fmt))
+                it += 1
+            bloco = bloco.next()
+        return trechos
+
+    def _aplicar_tamanho_em_pontos(self, pontos):
+        """Aplica o tamanho (em pontos) à seleção, ou ao texto digitado a
+        seguir se não houver seleção.
+
+        Mesclar o formato "tamanho = N pt" não basta: a mesclagem só
+        acrescenta propriedades, nunca remove. Num trecho que já tinha
+        tamanho em pixels (texto colado da web), o pixel antigo continua
+        valendo e o texto não muda de tamanho. Por isso, além de mesclar,
+        removemos as propriedades conflitantes dos trechos que as têm."""
+        editor = self.text_edit
+        cursor = editor.textCursor()
+
+        def com_tamanho_em_pontos(fmt):
+            for propriedade in PROPRIEDADES_TAMANHO_CONFLITANTES:
+                fmt.clearProperty(propriedade)
+            fmt.setFontPointSize(pontos)
+            return fmt
+
+        if not cursor.hasSelection():
+            editor.setCurrentCharFormat(com_tamanho_em_pontos(editor.currentCharFormat()))
+            return
+
+        inicio, fim = cursor.selectionStart(), cursor.selectionEnd()
+        cursor.beginEditBlock()   # desfazer reverte tudo de uma vez
+        try:
+            fmt_pontos = QTextCharFormat()
+            fmt_pontos.setFontPointSize(pontos)
+            editor.mergeCurrentCharFormat(fmt_pontos)
+
+            for ini, fm, fmt in self._trechos_com_tamanho_conflitante(inicio, fim):
+                trecho = QTextCursor(editor.document())
+                trecho.setPosition(ini)
+                trecho.setPosition(fm, QTextCursor.KeepAnchor)
+                trecho.setCharFormat(com_tamanho_em_pontos(fmt))
+        finally:
+            cursor.endEditBlock()
 
     def definir_alinhamento(self, alinhamento):
         # setAlignment age sobre o(s) parágrafo(s) do cursor/seleção atual.
@@ -1347,18 +1423,56 @@ class Editor(QMainWindow):
         cursor.endEditBlock()
         self.text_edit.setFocus()
 
+    def _fonte_efetiva(self):
+        """Família e tamanho (em pontos) do texto no cursor, do jeito que ele
+        realmente aparece na tela.
+
+        O formato de caractere só guarda o que foi definido explicitamente
+        naquele trecho; o que não foi vem da fonte padrão do documento.
+        Dois cuidados: (1) QTextCharFormat.font() devolve a fonte *do
+        aplicativo* para o que não foi definido, não a do documento, então
+        só a usamos quando a família foi mesmo definida; (2) o tamanho pode
+        estar em pixels (texto colado de páginas da web, por exemplo), caso
+        em que fontPointSize() devolve 0."""
+        fmt = self.text_edit.currentCharFormat()
+        padrao = self.text_edit.document().defaultFont()
+        dpi = self.text_edit.logicalDpiY() or 96
+
+        if not PROPRIEDADES_FAMILIA or any(fmt.hasProperty(p) for p in PROPRIEDADES_FAMILIA):
+            familia = fmt.font().family()
+        else:
+            familia = padrao.family()
+
+        pontos = None
+        if fmt.hasProperty(QTextFormat.FontPointSize) or fmt.hasProperty(QTextFormat.FontPixelSize):
+            # Um trecho pode ter os dois tamanhos (texto colado da web tem),
+            # e quem decide qual vale é o Qt. Usamos a fonte que ele monta
+            # a partir do formato, que é a mesma usada na hora de desenhar.
+            fonte = fmt.font()
+            if fonte.pixelSize() > 0:
+                pontos = fonte.pixelSize() * 72.0 / dpi
+            elif fonte.pointSizeF() > 0:
+                pontos = fonte.pointSizeF()
+
+        if pontos is None:
+            pontos = padrao.pointSizeF()
+            if pontos <= 0 and padrao.pixelSize() > 0:
+                pontos = padrao.pixelSize() * 72.0 / dpi
+            if pontos <= 0:
+                pontos = 11.0
+        return familia, pontos
+
     def _sincronizar_botoes(self):
         fmt = self.text_edit.currentCharFormat()
+        familia, pontos = self._fonte_efetiva()
 
         self.combo_fonte.blockSignals(True)
-        self.combo_fonte.setCurrentFont(QFont(fmt.font().family()))
+        self.combo_fonte.setCurrentFont(QFont(familia))
         self.combo_fonte.blockSignals(False)
 
-        tamanho = fmt.fontPointSize()
-        if tamanho <= 0:
-            tamanho = self.text_edit.font().pointSize()
+        # ":g" mostra 11 em vez de 11.0, e 9.75 quando o tamanho não é inteiro
         self.combo_tamanho.blockSignals(True)
-        self.combo_tamanho.setCurrentText(str(int(tamanho)))
+        self.combo_tamanho.setCurrentText(f"{pontos:g}")
         self.combo_tamanho.blockSignals(False)
 
         for acao in (self.acao_negrito, self.acao_italico,

@@ -1,0 +1,7 @@
+# Dependências para desenvolver e testar o Sauim:
+#   python -m pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8
+pytest-qt>=4.4
+pypdf>=4        # confere o texto e as páginas dos PDFs gerados nos testes de impressão
+ruff>=0.5       # checagem estática (imports sem uso, nomes indefinidos...)
