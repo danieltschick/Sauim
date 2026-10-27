@@ -17,7 +17,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QTextCharFormat, QFont, QTextCursor, QPainter, QPen,
     QColor, QAction, QKeySequence, QPageSize, QImage,
-    QTextImageFormat, QIcon, QBrush, QTransform, QTextFormat
+    QIcon, QBrush, QTransform, QTextFormat
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 from PySide6.QtWidgets import (
@@ -1567,6 +1567,17 @@ class Editor(QMainWindow):
             event.ignore()
 
 
+def arquivo_dos_argumentos(argumentos):
+    """Duplo clique num arquivo .saui: o Windows inicia o programa passando o
+    caminho do arquivo como argumento. Devolve o caminho absoluto do primeiro
+    argumento (depois do nome do programa) que seja um arquivo existente,
+    ignorando opções do tipo "-platform ...", ou None se não houver."""
+    for argumento in argumentos[1:]:
+        if os.path.isfile(argumento):
+            return os.path.abspath(argumento)
+    return None
+
+
 def main():
     app = QApplication(sys.argv)
     icone = caminho_recurso("sauim.ico")
@@ -1575,13 +1586,10 @@ def main():
     janela = Editor()
     janela.show()
 
-    # Duplo clique num arquivo .saui: o Windows inicia o programa passando o
-    # caminho do arquivo como argumento. Abrimos o primeiro argumento que
-    # seja um arquivo existente (ignorando opções do tipo "-platform ...").
-    for argumento in app.arguments()[1:]:
-        if os.path.isfile(argumento):
-            janela.abrir_caminho(os.path.abspath(argumento))
-            break
+    # Aberto por um duplo clique num arquivo? Então carrega esse arquivo.
+    arquivo = arquivo_dos_argumentos(app.arguments())
+    if arquivo:
+        janela.abrir_caminho(arquivo)
 
     # Depois que a janela já apareceu e o primeiro ciclo de eventos rodou.
     QTimer.singleShot(0, janela.text_edit.reaplicar_tamanho_pagina)
