@@ -1,7 +1,7 @@
 """Zoom da vista: não pode alterar o documento nem o tamanho da página."""
 import pytest
 
-import editor
+import Sauim as sauim
 from ajudas import pagina_valida
 
 
@@ -19,15 +19,15 @@ def test_ampliar_e_reduzir_seguem_os_passos(janela):
 
 def test_zoom_respeita_os_limites(janela):
     janela.visao.definir_zoom(999)
-    assert janela.visao.zoom() == pytest.approx(editor.ZOOM_MAX)
+    assert janela.visao.zoom() == pytest.approx(sauim.ZOOM_MAX)
     janela.visao.definir_zoom(0.001)
-    assert janela.visao.zoom() == pytest.approx(editor.ZOOM_MIN)
+    assert janela.visao.zoom() == pytest.approx(sauim.ZOOM_MIN)
 
 
 def test_ampliar_no_maximo_nao_passa_do_limite(janela):
-    janela.visao.definir_zoom(editor.ZOOM_MAX)
+    janela.visao.definir_zoom(sauim.ZOOM_MAX)
     janela.ampliar_zoom()
-    assert janela.visao.zoom() == pytest.approx(editor.ZOOM_MAX)
+    assert janela.visao.zoom() == pytest.approx(sauim.ZOOM_MAX)
 
 
 def test_slider_e_rotulo_acompanham_o_zoom(janela):
@@ -60,5 +60,5 @@ def test_zoom_nao_altera_o_tamanho_de_pagina(janela, qtbot):
 def test_ajustar_a_largura_faz_a_folha_caber_na_janela(janela):
     janela.visao.ajustar_a_largura()
     zoom = janela.visao.zoom()
-    assert editor.ZOOM_MIN <= zoom <= editor.ZOOM_MAX
+    assert sauim.ZOOM_MIN <= zoom <= sauim.ZOOM_MAX
     assert janela.text_edit.width() * zoom <= janela.visao.viewport().width() + 1

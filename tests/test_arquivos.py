@@ -6,10 +6,10 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-import editor
+import Sauim as sauim
 from ajudas import formato_do_caractere, pagina_valida
 
-F = editor.FILTROS_ARQUIVO     # [ .saui , .html , .txt ]
+F = sauim.FILTROS_ARQUIVO     # [ .saui , .html , .txt ]
 
 
 def _dialogo_de_salvar(monkeypatch, caminho, filtro, chamadas=None):
@@ -66,7 +66,7 @@ def test_saui_e_json_com_html_e_pagina(janela, tmp_path):
     janela._salvar_em(str(caminho))
     dados = json.loads(caminho.read_text(encoding="utf-8"))
     assert dados["formato"] == "sauim"
-    assert dados["versao"] == editor.VERSAO_FORMATO
+    assert dados["versao"] == sauim.VERSAO_FORMATO
     assert "Olá" in dados["conteudo_html"]
     assert set(dados["pagina"]) == {"largura_mm", "altura_mm", "margem_mm"}
 
@@ -146,7 +146,7 @@ def test_json_invalido_mostra_erro(janela, tmp_path, monkeypatch):
 # Regressão: o programa abria vazio, porque ignorava o argumento.
 
 def test_argumentos_sem_arquivo():
-    assert editor.arquivo_dos_argumentos(["sauim.exe"]) is None
+    assert sauim.arquivo_dos_argumentos(["sauim.exe"]) is None
 
 
 def test_argumentos_ignoram_opcoes_e_pegam_o_primeiro_arquivo(tmp_path):
@@ -155,19 +155,19 @@ def test_argumentos_ignoram_opcoes_e_pegam_o_primeiro_arquivo(tmp_path):
     a.write_text("x")
     b.write_text("x")
     argumentos = ["sauim.exe", "-platform", "windows", str(a), str(b)]
-    assert editor.arquivo_dos_argumentos(argumentos) == str(a)
+    assert sauim.arquivo_dos_argumentos(argumentos) == str(a)
 
 
 def test_argumentos_pulam_arquivo_inexistente(tmp_path):
     existente = tmp_path / "ok.saui"
     existente.write_text("x")
     argumentos = ["sauim.exe", str(tmp_path / "fantasma.saui"), str(existente)]
-    assert editor.arquivo_dos_argumentos(argumentos) == str(existente)
+    assert sauim.arquivo_dos_argumentos(argumentos) == str(existente)
 
 
 def test_argumento_relativo_vira_caminho_absoluto(tmp_path, monkeypatch):
     (tmp_path / "rel.saui").write_text("x")
     monkeypatch.chdir(tmp_path)
-    resultado = editor.arquivo_dos_argumentos(["sauim.exe", "rel.saui"])
+    resultado = sauim.arquivo_dos_argumentos(["sauim.exe", "rel.saui"])
     assert os.path.isabs(resultado)
     assert os.path.samefile(resultado, tmp_path / "rel.saui")

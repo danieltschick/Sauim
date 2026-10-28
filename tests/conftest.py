@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
-import editor  # o editor.py fica na raiz do projeto
+import Sauim as sauim  # o Sauim.py fica na raiz do projeto
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +43,7 @@ def _marcar_como_salvo(janela):
 @pytest.fixture
 def janela(qtbot):
     """Uma janela do Sauim já aberta, como logo depois de iniciar o programa."""
-    j = editor.Editor()
+    j = sauim.Editor()
     # O pytest-qt fecha as janelas no COMEÇO do teardown, antes do cleanup
     # desta fixture; por isso o "marcar como salvo" vai em before_close_func.
     qtbot.addWidget(j, before_close_func=_marcar_como_salvo)
@@ -61,7 +61,7 @@ def criar_saui(tmp_path):
         caminho = tmp_path / nome
         dados = {
             "formato": "sauim",
-            "versao": editor.VERSAO_FORMATO,
+            "versao": sauim.VERSAO_FORMATO,
             "conteudo_html": html,
             "pagina": {"largura_mm": largura, "altura_mm": altura, "margem_mm": margem},
         }
